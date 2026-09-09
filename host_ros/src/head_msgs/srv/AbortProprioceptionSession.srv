@@ -1,0 +1,5 @@
+string reason
+---
+bool accepted
+string output_path
+string status

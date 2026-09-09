@@ -1,0 +1,4 @@
+---
+uint32 calibration_version
+string[] joint_names
+string status

@@ -1,0 +1,5 @@
+uint32 lease_token
+uint8 percent
+---
+bool accepted
+string reason

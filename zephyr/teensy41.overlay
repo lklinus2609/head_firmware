@@ -1,0 +1,79 @@
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/pwm/pwm.h>
+
+/*
+ * Board-specific wiring from teensy.net.  Pin muxing for these LPUARTs is
+ * supplied by Zephyr's Teensy 4.x board support.  OE polarity is deliberately
+ * kept in board.c and must still be verified on the assembled PCB.
+ */
+
+/ {
+  chosen {
+    zephyr,console = &cdc_acm_uart0;
+  };
+
+  /* J8 fan interface. Pin 33 drives Q1, so the PWM polarity is inverted to
+   * make the requested percentage equal the high-duty seen at fan pin 4.
+   * Pin 32 receives the open-collector tach signal through R13/R16. */
+  zephyr,user {
+    pwms = <&flexpwm2_pwm0 1 PWM_USEC(40) PWM_POLARITY_INVERTED>;
+    fan-tach-gpios = <&gpio2 12 GPIO_ACTIVE_HIGH>;
+  };
+};
+
+&pinctrl {
+  pinmux_fan_pwm: pinmux_fan_pwm {
+    group0 {
+      pinmux = <&iomuxc_gpio_emc_07_flexpwm2_pwmb0>;
+      drive-strength = "r0-6";
+      slew-rate = "slow";
+      nxp,speed = "100-mhz";
+    };
+  };
+};
+
+/* CDC ACM must be a child of the USB device controller; declaring it at the
+ * root compiles the node but cannot bind it to the Teensy's USB peripheral. */
+&zephyr_udc0 {
+  cdc_acm_uart0: cdc_acm_uart0 {
+    compatible = "zephyr,cdc-acm-uart";
+  };
+  /* Keep console/log traffic physically separate from the head protocol.
+   * Linux normally exposes CDC0 as ttyACM0 and this data interface as
+   * ttyACM1. The host bridge connects only to the latter. */
+  cdc_acm_uart1: cdc_acm_uart1 {
+    compatible = "zephyr,cdc-acm-uart";
+  };
+};
+
+&lpuart6 { status = "okay"; current-speed = <1000000>; }; /* J1: pins 0/1 */
+&lpuart1 { status = "okay"; current-speed = <1000000>; }; /* J2: pins 25/24 */
+&lpuart3 { status = "okay"; current-speed = <1000000>; }; /* J3: pins 16/17 */
+&lpuart5 { status = "okay"; current-speed = <1000000>; }; /* J4: pins 34/35 */
+
+/* Internal reset watchdog; no external WDOG_B pin is required. */
+&wdog0 { status = "okay"; };
+
+/* Teensy pin 33 is FLEXPWM2_PWMB0, which is channel 1 (the B output) of
+ * submodule 0. A low prescaler retains useful duty-cycle resolution at
+ * Noctua's required 25 kHz control frequency. */
+&flexpwm2_pwm0 {
+  pinctrl-0 = <&pinmux_fan_pwm>;
+  pinctrl-names = "default";
+  nxp,prescaler = <1>;
+  status = "okay";
+};
+
+/* Reserve the final 192 KiB of the 8 MiB QSPI flash for three NVS sectors.
+ * The production linker/flash procedure must preserve this partition. */
+&w25q64jvxgim {
+  partitions {
+    compatible = "fixed-partitions";
+    #address-cells = <1>;
+    #size-cells = <1>;
+    storage_partition: partition@7d0000 {
+      label = "storage";
+      reg = <0x007d0000 0x00030000>;
+    };
+  };
+};

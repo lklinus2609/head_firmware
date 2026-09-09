@@ -1,0 +1,5 @@
+uint32 lease_token
+uint8 servo_index
+---
+bool accepted
+string reason

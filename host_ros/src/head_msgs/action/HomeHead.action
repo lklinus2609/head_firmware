@@ -1,0 +1,9 @@
+uint32 lease_token
+---
+bool success
+uint8 failed_servo
+string reason
+---
+# 255 means unavailable because wire protocol v2 does not report this value.
+uint8 active_servo
+string phase

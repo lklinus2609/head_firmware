@@ -1,0 +1,10 @@
+std_msgs/Header header
+uint32 lease_token
+uint32 sequence
+uint8 POSITION=0
+uint8 POSITION_VELOCITY=1
+uint8 VELOCITY=2
+uint8 mode
+string[] names
+float32[] position
+float32[] velocity

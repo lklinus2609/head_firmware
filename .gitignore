@@ -1,0 +1,17 @@
+# West-managed dependencies. Restore with: west update
+/deps/
+/modules/
+/bootloader/
+/tools/
+/.west/
+
+# Build output
+/builds/*
+!/builds/README.md
+/.pio/
+
+# Local Python environment
+/.venv/
+
+__pycache__/
+*.pyc

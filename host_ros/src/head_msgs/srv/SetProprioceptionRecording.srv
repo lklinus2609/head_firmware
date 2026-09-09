@@ -1,0 +1,6 @@
+bool recording
+---
+bool accepted
+string state
+string output_path
+string reason

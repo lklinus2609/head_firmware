@@ -1,0 +1,5 @@
+string requester
+---
+bool granted
+uint32 lease_token
+string reason

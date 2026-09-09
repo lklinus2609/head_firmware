@@ -1,0 +1,13 @@
+string name
+float32 goal_normalized
+float32 present_normalized
+int32 goal_tick
+int32 present_tick
+int32 present_velocity_raw
+int16 current_ma
+uint16 voltage_mv
+uint8 temperature_c
+uint8 moving_status
+uint8 hardware_error
+bool online
+uint32 feedback_age_ms

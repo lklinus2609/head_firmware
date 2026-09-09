@@ -1,0 +1,11 @@
+string operator_id
+string skin_installation_id
+string pose_id
+string fixture_id
+string contact_region
+string notes
+uint32 warmup_ms
+---
+bool accepted
+string session_id
+string reason

@@ -1,0 +1,22 @@
+/* USB-only devicetree for the robot-head bench image. Do not enable LPUARTs,
+ * buffer-enable GPIOs, fan PWM/tach, or the QSPI storage partition here. */
+/ {
+  chosen {
+    zephyr,console = &cdc_acm_uart0;
+  };
+};
+
+&zephyr_udc0 {
+  cdc_acm_uart0: cdc_acm_uart0 {
+    compatible = "zephyr,cdc-acm-uart";
+  };
+  cdc_acm_uart1: cdc_acm_uart1 {
+    compatible = "zephyr,cdc-acm-uart";
+  };
+};
+
+/* The upstream Teensy board enables LPUART6 by default on pins 0/1. Those
+ * are J1's branch pins on this PCB, so explicitly leave it electrically
+ * inactive in the no-12-V bench image. All other branch LPUARTs default to
+ * disabled and are intentionally not enabled here. */
+&lpuart6 { status = "disabled"; };

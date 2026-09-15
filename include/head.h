@@ -18,9 +18,29 @@
 #define HEAD_TELEMETRY_PERIOD_MS 10u
 /* Five 88-byte replies require 4.4 ms at the current 1 Mbps setting,
  * before byte stuffing and UART idle-delivery scheduling. */
+/* Admission window for a motion command: feedback this old or newer. */
+#define HEAD_COMMAND_FEEDBACK_FRESH_MS 30u
 #define HEAD_TELEMETRY_RESPONSE_TIMEOUT_MS 8u
+/* Homing acts on measured position every cycle, so it must notice feedback
+ * that has stopped -- but it must tolerate a lost Sync Read. One miss costs a
+ * 10 ms poll plus its 8 ms timeout before the next attempt even starts, so
+ * this allows two consecutive misses and still faults on a real stall. */
+/* Arrival window for zero homing: ~1.8 degrees on a 4096-tick revolution. */
+#define HEAD_ZERO_HOME_SETTLE_TICKS 20
+#define HEAD_HOMING_FEEDBACK_STALE_MS 60u
+/* Supervisor limit while torque may be on: holding torque on feedback that
+ * has stopped is the hazard, so this must stay short -- but it has to outlast
+ * one lost Sync Read (a 10 ms poll plus its 8 ms timeout) or it fires on a
+ * healthy bus. Same budget as the homing window, for the same reason. */
+#define HEAD_TELEMETRY_STALE_FAULT_MS 60u
 #define HEAD_PROPRIOCEPTION_SETTLE_MS 2000u
+/* Each physical servo branch is protected by a 3 A fuse. Keep the configured
+ * and telemetry-derived servo-current sum below that hardware limit. */
+#define HEAD_BRANCH_CURRENT_BUDGET_MA 2500u
 #define HEAD_ROUTING_BASE_TICK 0
+/* One revolution of the servo's absolute encoder. Multi-turn Present Position
+ * is this many ticks per turn, so the encoder zeros are its multiples. */
+#define HEAD_ENCODER_TICKS_PER_REVOLUTION 4096
 #define HEAD_DXL_POSITION_MIN_TICK (-1048575)
 #define HEAD_DXL_POSITION_MAX_TICK 1048575
 #define HEAD_COACTUATED_GROUP_A_MASK ((1u << 9u) | (1u << 12u) | (1u << 14u))
@@ -58,6 +78,12 @@ enum head_fault {
   HEAD_FAULT_FAN,
   HEAD_FAULT_CONTROL_DEADLINE,
   HEAD_FAULT_TELEMETRY,
+  /* Reserved legacy protocol value. The former whole-head budget has been
+   * removed and current firmware never emits this fault. */
+  HEAD_FAULT_CURRENT_BUDGET,
+  /* Append-only protocol value: one physical branch exceeded its commissioned
+   * aggregate current budget. */
+  HEAD_FAULT_BRANCH_CURRENT_BUDGET,
 };
 
 enum head_torque_state {
@@ -124,6 +150,9 @@ struct head_servo_state {
   uint8_t firmware_version;
   bool online;
   uint32_t last_feedback_ms;
+  /* Updated only by full telemetry that includes Present Current(126), never
+   * by position-only preparation reads. */
+  uint32_t last_current_feedback_ms;
   int32_t goal_step_ticks_per_control_cycle;
 };
 
@@ -173,6 +202,8 @@ struct head_runtime {
   uint32_t proprioception_started_ms;
   uint8_t homing_index;
   uint8_t homing_torque_index;
+  /* Homing seeks the encoder's absolute zero instead of a mechanical stop. */
+  bool zero_homing;
   bool maintenance_calibration;
   bool maintenance_waiting_confirm;
   bool homing_backoff_active;
@@ -183,6 +214,8 @@ struct head_runtime {
   bool preparation_active;
   uint8_t preparation_phase;
   uint8_t preparation_servo_index;
+  /* Consecutive transient bus failures on the current preparation step. */
+  uint8_t preparation_attempts;
   enum head_state preparation_target_state;
   uint32_t preparation_started_ms;
   uint32_t preparation_completed_ms;

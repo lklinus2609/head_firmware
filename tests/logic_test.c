@@ -61,6 +61,51 @@ static void test_non_finite_calibration_is_rejected(void)
   assert(!head_config_validate(&calibration));
 }
 
+static void test_branch_current_budget(void)
+{
+  struct head_calibration calibration;
+  struct head_runtime runtime = {0};
+  make_valid_calibration(&calibration);
+  calibration.expected_servo_count = 3u;
+  calibration.active_servo_mask = 7u;
+  calibration.joints[0].operating_current_ma = 833;
+  calibration.joints[1] = calibration.joints[0];
+  calibration.joints[1].servo_id = 1u;
+  calibration.joints[2] = calibration.joints[0];
+  calibration.joints[2].servo_id = 2u;
+  calibration.joints[2].operating_current_ma = 834;
+  head_config_finalize(&calibration);
+  assert(head_config_operating_current_branch_ma(&calibration, 0u) == 2500u);
+  assert(head_config_validate(&calibration));
+
+  calibration.joints[2].operating_current_ma = 835;
+  head_config_finalize(&calibration);
+  assert(head_config_operating_current_branch_ma(&calibration, 0u) == 2501u);
+  assert(!head_config_validate(&calibration));
+
+  runtime.servos[0].present_current_ma = -900;
+  runtime.servos[1].present_current_ma = 901;
+  runtime.servos[2].present_current_ma = 700;
+  assert(head_control_present_current_branch_ma(&runtime, &calibration, 0u) == 2501u);
+
+  make_valid_calibration(&calibration);
+  calibration.expected_servo_count = 3u;
+  calibration.active_servo_mask = (1u << 0u) | (1u << 5u) | (1u << 10u);
+  for (uint8_t index = 5u; index <= 10u; index += 5u) {
+    calibration.joints[index] = calibration.joints[0];
+    calibration.joints[index].branch_index = index / HEAD_SERVOS_PER_BRANCH;
+    calibration.joints[index].servo_id = index;
+  }
+  calibration.joints[0].operating_current_ma = 900;
+  calibration.joints[5].operating_current_ma = 900;
+  calibration.joints[10].operating_current_ma = 900;
+  head_config_finalize(&calibration);
+  assert(head_config_operating_current_branch_ma(&calibration, 0u) == 900u);
+  assert(head_config_operating_current_branch_ma(&calibration, 1u) == 900u);
+  assert(head_config_operating_current_branch_ma(&calibration, 2u) == 900u);
+  assert(head_config_validate(&calibration));
+}
+
 static void test_calibration_storage_schema_round_trip(void)
 {
   struct head_calibration source;
@@ -293,11 +338,13 @@ static void make_calibration_mask(struct head_calibration *calibration,
     joint->homing_direction = 1.0f;
     joint->homing_max_travel_ticks = 100;
     joint->homing_timeout_ms = 1000u;
-    joint->operating_current_ma = 100;
-    joint->homing_current_ma = 50;
+    /* A full branch remains well within its 2,500 mA budget while sparse
+     * fixtures exercise the same lifecycle paths. */
+    joint->operating_current_ma = 50;
+    joint->homing_current_ma = 25;
     joint->homing_following_error_ticks = 0;
     joint->homing_persistence_ms = 10u;
-    joint->homing_current_limit_ma = 75;
+    joint->homing_current_limit_ma = 40;
     joint->homing_speed_ticks_per_second = 500u;
     joint->homing_backoff_ticks = 5;
     ++active_count;
@@ -364,6 +411,91 @@ static void test_terminal_homing_inventory(uint32_t active_servo_mask)
   assert(runtime.torque_state == HEAD_TORQUE_SHUTDOWN_PENDING);
 }
 
+/* Zero homing has no stop to find: it drives to the nearest encoder zero and
+ * takes that as the datum, so the reference must land on an exact multiple of a
+ * revolution regardless of which side the joint started on. */
+static void run_one_zero_homing_servo(struct head_runtime *runtime,
+                                      const struct head_calibration *calibration,
+                                      uint8_t servo_index, int32_t start_tick,
+                                      int32_t expected_zero, uint32_t *now_ms)
+{
+  struct head_servo_state *servo = &runtime->servos[servo_index];
+  servo->online = true;
+  servo->present_voltage_mv = 8000u;
+  servo->present_current_ma = 0;
+  servo->present_tick = start_tick;
+  servo->goal_tick = start_tick;
+  servo->last_feedback_ms = *now_ms;
+
+  head_state_homing_tick(runtime, calibration, *now_ms);
+  /* Feedback follows the commanded goal, as it would on the bus. */
+  for (uint32_t tick = 0u; tick < 20000u &&
+       !runtime->homing_reference_valid[servo_index]; ++tick) {
+    *now_ms += 1u;
+    servo->present_tick = servo->goal_tick;
+    servo->last_feedback_ms = *now_ms;
+    head_state_homing_tick(runtime, calibration, *now_ms);
+    if (runtime->fault != HEAD_FAULT_NONE) break;
+  }
+  assert(runtime->fault == HEAD_FAULT_NONE);
+  assert(runtime->homing_reference_valid[servo_index]);
+  assert(runtime->homing_zero_tick[servo_index] == expected_zero);
+  /* The encoder's own zero, the expressible one of the two 0/360 ticks. */
+  assert(runtime->homing_zero_tick[servo_index] == 0);
+}
+
+static void test_zero_homing_reaches_encoder_zero(void)
+{
+  const struct {
+    int32_t start;
+    int32_t expected;
+  } cases[] = {
+    /* Every revolution is the same shaft angle, but only tick 0 is inside the
+     * servo's Max Position Limit, so that is the datum from anywhere. */
+    { 690, 0 },
+    { -923, 0 },
+    { 3000, 0 },
+    { -3000, 0 },
+    { 0, 0 },            /* already there: no motion needed */
+  };
+  for (size_t index = 0u; index < sizeof(cases) / sizeof(cases[0]); ++index) {
+    struct head_calibration calibration;
+    struct head_runtime runtime = {0};
+    uint32_t now_ms = 100u;
+    make_calibration_mask(&calibration, 1u);
+    /* A full half-revolution of travel, as the bench profile now allows. */
+    /* Two revolutions, as the bench profile allows: reaching a mid-revolution
+     * datum from a multi-turn position can need more than one turn. */
+    calibration.joints[0].homing_max_travel_ticks = 8192;
+    calibration.joints[0].homing_timeout_ms = 60000u;
+    head_config_finalize(&calibration);
+    assert(head_config_validate(&calibration));
+    head_state_init(&runtime);
+    /* Requesting motion needs a verified-off bus; preparation is what turns
+     * torque on, so mirror that ordering rather than starting energized. */
+    runtime.torque_state = HEAD_TORQUE_OFF_VERIFIED;
+    runtime.discovery_verified = true;
+    runtime.state = HEAD_HOMING_REQUIRED;
+    assert(head_state_request_zero_home(&runtime, &calibration));
+    assert(runtime.zero_homing);
+    assert(runtime.state == HEAD_HOMING);
+    runtime.torque_state = HEAD_TORQUE_ON_VERIFIED;
+    run_one_zero_homing_servo(&runtime, &calibration, 0u, cases[index].start,
+                              cases[index].expected, &now_ms);
+    /* Arrive and hold: an encoder-zero datum has no mechanical stop holding
+     * the joint, so releasing torque on arrival would let it drift straight
+     * back off the position just established. */
+    assert(runtime.state == HEAD_PROPRIOCEPTION_HOLD);
+    assert(!runtime.shutdown_requested);
+    assert(runtime.torque_state == HEAD_TORQUE_ON_VERIFIED);
+    /* The datum must not survive a disable: the turn count is only valid for
+     * as long as the servo stays powered. */
+    head_state_disable(&runtime);
+    assert(!runtime.zero_homing);
+    assert(runtime.shutdown_requested);
+  }
+}
+
 static void test_terminal_homing_single_sparse_and_full(void)
 {
   test_terminal_homing_inventory(1u);
@@ -414,6 +546,55 @@ static void test_fault_shutdown_is_idempotent(void)
   assert(runtime.shutdown_next_attempt_ms == 7000u);
   assert(runtime.shutdown_failures == 3u);
   assert(runtime.shutdown_confirmations == 1u);
+}
+
+/* The diagnostic escape hatch for a silent bus must open only when nothing can
+ * be energized, and must stay shut for every servo that was ever torque-on. */
+static void test_torque_never_commanded_on_gate(void)
+{
+  struct head_runtime runtime = {0};
+  head_state_init(&runtime);
+
+  /* Boot: not a fault, so no relaxation regardless of torque state. */
+  assert(!head_state_torque_never_commanded_on(&runtime));
+
+  /* Discovery failed before any torque-on. The shutdown sweep parks here
+   * forever against silent servos, and read-only diagnostics stay reachable. */
+  head_state_fault(&runtime, HEAD_FAULT_DISCOVERY);
+  assert(runtime.torque_state == HEAD_TORQUE_SHUTDOWN_PENDING);
+  assert(head_state_torque_may_be_on(&runtime));
+  assert(head_state_torque_never_commanded_on(&runtime));
+  runtime.torque_state = HEAD_TORQUE_SHUTDOWN_FAILED;
+  assert(head_state_torque_never_commanded_on(&runtime));
+
+  /* A servo that reached torque-on is never covered, in any later state: the
+   * shutdown states erase ON_VERIFIED, so discovery_verified carries the fact
+   * that preparation once ran. */
+  struct head_runtime energized = {0};
+  head_state_init(&energized);
+  energized.discovery_verified = true;
+  energized.state = HEAD_ENABLED;
+  energized.torque_state = HEAD_TORQUE_ON_VERIFIED;
+  assert(!head_state_torque_never_commanded_on(&energized));
+  head_state_fault(&energized, HEAD_FAULT_BUS);
+  assert(energized.torque_state == HEAD_TORQUE_SHUTDOWN_PENDING);
+  assert(!head_state_torque_never_commanded_on(&energized));
+  energized.torque_state = HEAD_TORQUE_SHUTDOWN_FAILED;
+  assert(!head_state_torque_never_commanded_on(&energized));
+
+  /* ON_VERIFIED is refused even if discovery_verified were somehow clear. */
+  struct head_runtime on_verified = {0};
+  head_state_init(&on_verified);
+  on_verified.state = HEAD_FAULT;
+  on_verified.torque_state = HEAD_TORQUE_ON_VERIFIED;
+  assert(!head_state_torque_never_commanded_on(&on_verified));
+
+  /* The relaxation must not become a motion path. */
+  struct head_calibration calibration;
+  make_valid_calibration(&calibration);
+  assert(!head_state_can_prepare_motion(&runtime));
+  assert(!head_state_request_home(&runtime, &calibration));
+  assert(!head_state_request_enable(&runtime));
 }
 
 static void test_storage_excludes_motion_preparation(void)
@@ -478,6 +659,7 @@ static void test_shifted_homing_reference_position_boundaries(void)
 int main(void)
 {
   test_non_finite_calibration_is_rejected();
+  test_branch_current_budget();
   test_calibration_storage_schema_round_trip();
   test_lease_expiry_and_rollover();
   test_command_validation_and_sequence();
@@ -489,8 +671,10 @@ int main(void)
   test_trajectory_reversal_is_bounded();
   test_trajectory_invariants_and_convergence();
   test_terminal_homing_single_sparse_and_full();
+  test_zero_homing_reaches_encoder_zero();
   test_fault_latch_and_disable_recovery_gate();
   test_fault_shutdown_is_idempotent();
+  test_torque_never_commanded_on_gate();
   test_storage_excludes_motion_preparation();
   test_shifted_homing_reference_position_boundaries();
   return 0;

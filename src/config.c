@@ -211,6 +211,21 @@ bool head_config_deserialize(const uint8_t *input, size_t length,
 
 uint32_t head_config_generation(void) { return storage_generation; }
 
+uint32_t head_config_operating_current_branch_ma(
+    const struct head_calibration *calibration, uint8_t branch_index)
+{
+  uint32_t total_current_ma = 0u;
+  if (calibration == NULL || branch_index >= HEAD_BRANCH_COUNT) return UINT32_MAX;
+  const uint8_t first_servo = branch_index * HEAD_SERVOS_PER_BRANCH;
+  const uint8_t end_servo = first_servo + HEAD_SERVOS_PER_BRANCH;
+  for (uint8_t servo_index = first_servo; servo_index < end_servo; ++servo_index) {
+    if ((calibration->active_servo_mask & (1u << servo_index)) == 0u) continue;
+    const int16_t current_ma = calibration->joints[servo_index].operating_current_ma;
+    if (current_ma > 0) total_current_ma += (uint16_t)current_ma;
+  }
+  return total_current_ma;
+}
+
 bool head_config_validate(const struct head_calibration *calibration)
 {
   uint32_t crc;
@@ -262,6 +277,12 @@ bool head_config_validate(const struct head_calibration *calibration)
         joint->homing_speed_ticks_per_second > 50000u ||
         joint->homing_backoff_ticks <= 0 ||
         joint->homing_backoff_ticks > joint->homing_max_travel_ticks) {
+      return false;
+    }
+  }
+  for (uint8_t branch_index = 0u; branch_index < HEAD_BRANCH_COUNT; ++branch_index) {
+    if (head_config_operating_current_branch_ma(calibration, branch_index) >
+        HEAD_BRANCH_CURRENT_BUDGET_MA) {
       return false;
     }
   }

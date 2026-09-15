@@ -24,6 +24,15 @@ static uint8_t discovery_reason[HEAD_SERVO_COUNT];
  * Refusing every transfer would make that unrecoverable: the repair write is
  * exactly what the alert blocks. Reads/writes stay refused everywhere else. */
 static bool alert_tolerant_configuration;
+/* Extra read attempts allowed for the current caller, and a saturating total
+ * so the underlying loss rate stays visible instead of being hidden. */
+static uint8_t read_retry_attempts;
+static uint16_t read_retry_count;
+/* Last Goal Position actually put on the wire, so a profile-driven move is not
+ * restarted by a redundant rewrite. Only consulted while zero homing. */
+static int32_t transmitted_goal_tick[HEAD_SERVO_COUNT];
+static bool transmitted_goal_valid;
+static uint32_t transmitted_goal_ms;
 /* Address and raw Protocol 2.0 error byte of the most recent rejected
  * register transfer, so a failed ensure/read names the register and the
  * servo's own complaint (bits 0-6: 4=data range, 6=data limit, 7=access). */
@@ -60,6 +69,13 @@ uint32_t head_dxl_take_hardware_alert_mask(void)
 #define DXL_OPERATING_MODE_CURRENT_POSITION 5u
 #define DXL_BAUD_1M 3u
 #define DXL_BUS_WATCHDOG_200_MS 10u
+/* Preparation arms the servo's own Bus Watchdog, which stops the motor when no
+ * goal update arrives inside its window. Suppressing unchanged Goal Position
+ * writes stops a profile being restarted, but suppressing them indefinitely
+ * starves that watchdog: it trips, the servo stops, traffic resumes, it drives
+ * again -- a 5 Hz stop-go cycle that reads as the joint oscillating on target.
+ * Refresh comfortably inside the window instead of never. */
+#define DXL_GOAL_REFRESH_MS 100u
 #define DXL_MINIMUM_WATCHDOG_FIRMWARE 38u
 #define DXL_STARTUP_CONFIGURATION_FIRMWARE 46u
 #define DXL_STARTUP_TORQUE_ON_MASK 0x01u
@@ -76,9 +92,28 @@ uint32_t head_dxl_take_hardware_alert_mask(void)
  * shows up tens of milliseconds late is a delivery problem in the firmware RX
  * path; total silence across this window is not. Only used with torque off. */
 #define DXL_DEBUG_PING_WINDOW_US 40000u
+/* Control-table addresses below this are EEPROM; at and above it are RAM. */
+/* Zero-home trajectory, in control-table units: Profile Velocity steps of
+ * 0.229 rev/min and Profile Acceleration steps of 214.577 rev/min^2. 20 and 5
+ * are about 4.6 rev/min (~27 deg/s) reached over roughly a quarter second. */
+/* Zero means unlimited, so with both at zero the servo runs at its Velocity
+ * Limit and is still at full speed when it reaches the goal: the position loop
+ * absorbs all of it and rings. A short move never builds that speed, which is
+ * why an unprofiled hop looks clean and a revolution-and-a-half does not. These
+ * give the trapezoid a deceleration ramp instead. Units are 0.229 rev/min and
+ * 214.577 rev/min^2, so this is ~34 rev/min reached over about a tenth of a
+ * second -- a full revolution in roughly 1.7 s, inside the homing timeout. */
+#define DXL_ZERO_HOME_PROFILE_ACCELERATION 0u
+#define DXL_ZERO_HOME_PROFILE_VELOCITY 0u
+#define DXL_EEPROM_ADDRESS_END 64u
+#define DXL_EEPROM_COMMIT_RETRIES 6u
+#define DXL_EEPROM_COMMIT_DELAY_MS 3u
 #define DXL_MINIMUM_SAFE_VOLTAGE_MV 6500u
 /* XC330-T181 datasheet: Input Voltage 6.5 ~ 12.0 V (recommended 11.1 V).
- * Do not raise this to accommodate an out-of-spec supply. */
+ * Do not raise this to accommodate an out-of-spec supply. This bounds the
+ * measured steady-state supply before torque-on and is deliberately NOT the
+ * value written to the servo's own Max Voltage Limit (address 32), which is
+ * a per-sample trip that must tolerate regenerative transients. */
 #define DXL_MAXIMUM_SAFE_VOLTAGE_MV 12000u
 
 static int dxl_verify_register_u8_all(const struct head_calibration *calibration,
@@ -87,6 +122,8 @@ static int dxl_ensure_register(uint8_t branch_index, uint8_t servo_id, uint16_t 
                                const uint8_t *expected, uint16_t length);
 static int dxl_read_register(uint8_t branch_index, uint8_t servo_id, uint16_t address,
                              uint16_t length, uint8_t *data);
+#define DXL_DISCOVERY_READ_RETRIES 2u
+#define HEAD_PREPARATION_STEP_RETRIES 3u
 static int dxl_write_register_u8(uint8_t branch_index, uint8_t servo_id, uint16_t address,
                                  uint8_t value);
 static int dxl_write_register_bytes(uint8_t branch_index, uint8_t servo_id, uint16_t address,
@@ -395,6 +432,24 @@ int head_dxl_write_targets(struct head_runtime *runtime,
     if (runtime->servos[servo_index].goal_tick < HEAD_DXL_POSITION_MIN_TICK ||
         runtime->servos[servo_index].goal_tick > HEAD_DXL_POSITION_MAX_TICK) return -ERANGE;
   }
+  /* Goal Position is normally streamed every control cycle, which is correct
+   * while Profile Velocity and Acceleration are zero: each write just means
+   * "be here now". Zero homing instead gives the servo a profile and a single
+   * destination, and every write of Goal Position restarts that trajectory --
+   * so rewriting an unchanged goal five hundred times a second would leave the
+   * servo perpetually re-entering its acceleration phase and never decelerating
+   * into the target. Send it only when it actually changes. */
+  if (runtime->zero_homing && transmitted_goal_valid) {
+    bool changed = false;
+    for (uint8_t servo_index = 0u; servo_index < HEAD_SERVO_COUNT && !changed; ++servo_index) {
+      if (!servo_active(calibration, servo_index)) continue;
+      changed = runtime->servos[servo_index].goal_tick != transmitted_goal_tick[servo_index];
+    }
+    if (!changed) {
+      if (written_branch_mask != NULL) *written_branch_mask = 0u;
+      return 0;
+    }
+  }
   uint8_t packet[HEAD_BRANCH_COUNT][64];
   bool started[HEAD_BRANCH_COUNT] = { false };
   int result = 0;
@@ -423,6 +478,31 @@ int head_dxl_write_targets(struct head_runtime *runtime,
       ++runtime->branches[branch_index].control_transmissions;
       written |= (uint8_t)(1u << branch_index);
     }
+  }
+  if (result == 0) {
+    /* Only a clean sweep is recorded: a failed branch must be retried, not
+     * suppressed as already sent. A branch deferred because its telemetry
+     * Sync Read was still in flight is equally unsent, but it `continue`s
+     * without touching `result`, so recording on `result == 0` alone marked
+     * goals as transmitted that never reached the wire. Under zero homing the
+     * suppression above then saw an unchanged goal and never rewrote it: the
+     * servo held whatever preparation had written -- its own start position --
+     * and homing ran out its timeout without the joint ever moving. Record
+     * only the branches that actually transmitted, so a deferred one keeps its
+     * previous transmitted goal, still compares as changed, and is retried on
+     * the next cycle.
+     *
+     * The window scales with branch population: a one-servo Sync Read occupies
+     * about 1.1 ms of each 10 ms telemetry period and a five-servo one about
+     * 5.1 ms, so a single servo usually slipped through and a full branch
+     * usually did not. */
+    for (uint8_t servo_index = 0u; servo_index < HEAD_SERVO_COUNT; ++servo_index) {
+      const uint8_t branch_index = servo_index / HEAD_SERVOS_PER_BRANCH;
+      if ((written & (uint8_t)(1u << branch_index)) == 0u) continue;
+      transmitted_goal_tick[servo_index] = runtime->servos[servo_index].goal_tick;
+    }
+    transmitted_goal_valid = true;
+    transmitted_goal_ms = k_uptime_get_32();
   }
   if (written_branch_mask != NULL) *written_branch_mask = written;
   return result;
@@ -453,8 +533,8 @@ static int dxl_read_status(uint8_t branch_index, uint8_t *response, size_t capac
   return 0;
 }
 
-static int dxl_read_register(uint8_t branch_index, uint8_t servo_id, uint16_t address,
-                             uint16_t length, uint8_t *data)
+static int dxl_read_register_once(uint8_t branch_index, uint8_t servo_id, uint16_t address,
+                                  uint16_t length, uint8_t *data)
 {
   uint8_t request[20];
   uint8_t response[64];
@@ -535,6 +615,25 @@ static int dxl_write_register_bytes(uint8_t branch_index, uint8_t servo_id, uint
   return 0;
 }
 
+/* Roughly one transfer in a hundred is lost on this bus without any protocol
+ * error, and a single-shot sequence multiplies that: twenty servos of seven
+ * transfers each would abort more often than it completes. Retry only where
+ * there is no reply to interpret. A status error is the servo rejecting the
+ * request on purpose, so repeating it would change nothing and hide a real
+ * rejection. Enabled only for callers that are not on a control deadline;
+ * preparation retries a whole step across control cycles instead. */
+static int dxl_read_register(uint8_t branch_index, uint8_t servo_id, uint16_t address,
+                             uint16_t length, uint8_t *data)
+{
+  int result = -EIO;
+  for (uint8_t attempt = 0u; attempt <= read_retry_attempts; ++attempt) {
+    result = dxl_read_register_once(branch_index, servo_id, address, length, data);
+    if (result != -EIO) break;
+    if (attempt < read_retry_attempts && read_retry_count < UINT16_MAX) ++read_retry_count;
+  }
+  return result;
+}
+
 static int dxl_ensure_register(uint8_t branch_index, uint8_t servo_id, uint16_t address,
                                const uint8_t *expected, uint16_t length)
 {
@@ -542,19 +641,31 @@ static int dxl_ensure_register(uint8_t branch_index, uint8_t servo_id, uint16_t 
   if (expected == NULL || length == 0u || length > sizeof(actual)) return -EINVAL;
   if (dxl_read_register(branch_index, servo_id, address, length, actual) != 0) return -EIO;
   if (memcmp(actual, expected, length) == 0) return 0;
-  if (dxl_write_register_bytes(branch_index, servo_id, address, expected, length) != 0 ||
-      dxl_read_register(branch_index, servo_id, address, length, actual) != 0 ||
-      memcmp(actual, expected, length) != 0) return -EIO;
-  return 0;
+  if (dxl_write_register_bytes(branch_index, servo_id, address, expected, length) != 0) return -EIO;
+  /* An EEPROM write is acknowledged before the cell is committed, so reading
+   * straight back can still return the previous value. That is indisputably a
+   * success being reported as -EIO: the servo raised no protocol error, and
+   * the same write lands on the next discovery pass. Only EEPROM pays the
+   * wait; a RAM register that disagrees after its write is a real mismatch and
+   * still fails on the first readback. Bounded well inside the 500 ms
+   * per-servo budget that discover_inventory_locked() enforces. */
+  for (uint8_t attempt = 0u; ; ++attempt) {
+    if (dxl_read_register(branch_index, servo_id, address, length, actual) != 0) return -EIO;
+    if (memcmp(actual, expected, length) == 0) return 0;
+    if (address >= DXL_EEPROM_ADDRESS_END || attempt >= DXL_EEPROM_COMMIT_RETRIES) return -EIO;
+    k_sleep(K_MSEC(DXL_EEPROM_COMMIT_DELAY_MS));
+  }
 }
 
 /* Preparation never runs an inventory-sized readback loop in one control
  * iteration. The owner checks cancellation, lease and a separate deadline
  * between steps. All servos are verified off before goals are changed. */
-int head_dxl_prepare_step(struct head_runtime *runtime,
+static int prepare_step_once(struct head_runtime *runtime,
                           const struct head_calibration *calibration)
 {
   if (runtime->preparation_phase == 0u) {
+    /* Nothing on the wire yet for this run. */
+    transmitted_goal_valid = false;
     const int result = head_dxl_emergency_torque_off();
     if (result != 0) return result;
     runtime->preparation_phase = 1u;
@@ -576,8 +687,8 @@ int head_dxl_prepare_step(struct head_runtime *runtime,
   runtime->preparation_servo_index = (uint8_t)(servo_index + 1u);
   const struct head_joint_config *joint = &calibration->joints[servo_index];
   if (homing && runtime->preparation_phase > 2u) runtime->preparation_servo_index = HEAD_SERVO_COUNT;
-  uint8_t actual[4];
-  uint8_t expected[4];
+  uint8_t actual[8];
+  uint8_t expected[8];
   uint16_t address = 0u;
   uint16_t length = 1u;
   switch (runtime->preparation_phase) {
@@ -590,15 +701,57 @@ int head_dxl_prepare_step(struct head_runtime *runtime,
     const uint32_t voltage_mv = ((uint32_t)actual[0] | ((uint32_t)actual[1] << 8u)) * 100u;
     if (voltage_mv < DXL_MINIMUM_SAFE_VOLTAGE_MV || voltage_mv > DXL_MAXIMUM_SAFE_VOLTAGE_MV) return -ERANGE;
     return 0;
-  case 4:
-    /* Goals are re-read and seeded immediately before enable below. */
-    return 0;
+  case 4: {
+    /* Profile Acceleration (108) and Profile Velocity (112) are contiguous and
+     * both zero from the factory. A stop search needs them zero because it
+     * shapes the motion itself, walking Goal Position one tick per control
+     * cycle. Zero homing writes a single destination instead, which with the
+     * profile at zero is exactly what DYNAMIXEL Wizard does. Re-asserted every
+     * preparation so nothing carries over between runs. */
+    address = 108u; length = 8u;
+    /* Zero means unlimited on a DYNAMIXEL, not stopped: with both at zero the
+     * servo drives at Velocity Limit (~117 rev/min, ~700 deg/s at the output)
+     * and arrives at full speed. A stop search still wants that, because it
+     * shapes the motion itself one tick at a time. Zero homing writes a single
+     * destination, so give the servo a trajectory to follow instead of letting
+     * it slam into the target. Redundant Goal Position writes are suppressed
+     * for this path, or each one would restart the profile. */
+    const uint32_t acceleration = runtime->zero_homing ?
+        DXL_ZERO_HOME_PROFILE_ACCELERATION : 0u;
+    const uint32_t velocity = runtime->zero_homing ?
+        DXL_ZERO_HOME_PROFILE_VELOCITY : 0u;
+    for (uint8_t byte = 0u; byte < 4u; ++byte) {
+      expected[byte] = (uint8_t)(acceleration >> (8u * byte));
+      expected[4u + byte] = (uint8_t)(velocity >> (8u * byte));
+    }
+    break;
+  }
   case 5:
     address = 102u; length = 2u;
-    const uint16_t current_ma = (uint16_t)(homing ? joint->homing_current_limit_ma : joint->operating_current_ma);
+    /* The homing limit exists to make a deliberate collision survivable: a stop
+     * search drives the joint into its endstop and reads the current rise as
+     * the detection itself. Zero homing collides with nothing -- it drives to a
+     * known encoder position -- so that limit protects against nothing here and
+     * costs a great deal. Set low enough it can saturate the current loop just
+     * overcoming the gearbox, which makes the servo stick, break free and
+     * overshoot rather than track the ramp. */
+    const bool collision_limited = homing && !runtime->zero_homing;
+    const uint16_t current_ma = (uint16_t)(collision_limited ?
+        joint->homing_current_limit_ma : joint->operating_current_ma);
     expected[0] = (uint8_t)current_ma; expected[1] = (uint8_t)(current_ma >> 8u);
     break;
-  case 6: address = 98u; expected[0] = DXL_BUS_WATCHDOG_200_MS; break;
+  case 6:
+    /* The servo's Bus Watchdog stops the motor when no goal update arrives in
+     * its window, which suits a stop search: that streams Goal Position every
+     * control cycle anyway, so the watchdog costs nothing and catches a dead
+     * master. Zero homing writes its destination once and lets the servo's own
+     * profile drive there, so there is nothing to feed the watchdog with --
+     * and refreshing the goal just to feed it restarts the profile, which is
+     * itself the oscillation. Leave it off for that path; the host lease still
+     * bounds a dead master, and stale telemetry still faults. */
+    address = 98u;
+    expected[0] = runtime->zero_homing ? 0u : DXL_BUS_WATCHDOG_200_MS;
+    break;
   case 7: {
     /* A mechanically coupled, unpowered joint may have moved since the last
      * stage. Read its position now, then verify that exact goal before torque. */
@@ -624,6 +777,51 @@ int head_dxl_prepare_step(struct head_runtime *runtime,
       dxl_read_register(joint->branch_index, joint->servo_id, address, length, actual) != 0 ||
       memcmp(actual, expected, length) != 0) return -EIO;
   return 0;
+}
+
+/* One lost transfer must not abort a torque-on sequence outright. Retrying
+ * inline is not available here: the owner aborts a step that exceeds 20 ms, so
+ * repeated 3 ms reads would trip the control deadline instead. Preparation is
+ * already incremental, so repeat the whole step on the next control cycle by
+ * rewinding the servo cursor and reporting "not complete yet". Every step is
+ * idempotent -- reads have no effect, and each write is re-verified -- so a
+ * repeat is safe even when the previous attempt's write landed. The 1500 ms
+ * preparation deadline bounds the retries whatever happens, and a genuinely
+ * unreachable servo still faults, just a few cycles later.
+ *
+ * -ERANGE and -EINVAL are never retried: an out-of-range voltage or position
+ * is the servo answering correctly with an answer that forbids motion. */
+int head_dxl_prepare_step(struct head_runtime *runtime,
+                          const struct head_calibration *calibration)
+{
+  if (runtime == NULL || calibration == NULL) return -EINVAL;
+  const uint8_t cursor = runtime->preparation_servo_index;
+  const int result = prepare_step_once(runtime, calibration);
+  if (result >= 0) {
+    runtime->preparation_attempts = 0u;
+    return result;
+  }
+  if (result == -ERANGE || result == -EINVAL) return result;
+  if (runtime->preparation_attempts >= HEAD_PREPARATION_STEP_RETRIES) return result;
+  /* Recover the receivers before retrying. A starved RX never reports
+   * RX_DISABLED, so it stays silent until something re-arms it -- and the
+   * telemetry timeout that normally does so is suppressed for the whole of
+   * preparation. Without this every retry would question the same dead
+   * receiver and the budget would drain for certain, which is exactly the
+   * burst of consecutive losses seen here. The branches are idle apart from
+   * this transfer, so re-arming all of them costs nothing. */
+  for (uint8_t branch_index = 0u; branch_index < HEAD_BRANCH_COUNT; ++branch_index) {
+    (void)head_board_branch_rx_restart(branch_index);
+  }
+  ++runtime->preparation_attempts;
+  if (read_retry_count < UINT16_MAX) ++read_retry_count;
+  runtime->preparation_servo_index = cursor;
+  return 0;
+}
+
+uint16_t head_dxl_read_retry_count(void)
+{
+  return read_retry_count;
 }
 
 /* Status Return Level 1 deliberately produces no Write response.  This helper
@@ -787,6 +985,7 @@ int head_dxl_discover(struct head_runtime *runtime,
   uint8_t online = 0u;
 
   alert_tolerant_configuration = true;
+  read_retry_attempts = DXL_DISCOVERY_READ_RETRIES;
   for (uint8_t index = 0; index < HEAD_SERVO_COUNT; ++index) {
     const struct head_joint_config *joint = &calibration->joints[index];
     size_t response_length = 0u;
@@ -797,18 +996,34 @@ int head_dxl_discover(struct head_runtime *runtime,
     const size_t size = dxl_ping(joint->servo_id, request, sizeof(request));
     runtime->servos[index].online = false;
     discovery_reason[index] = HEAD_DXL_DISCOVERY_NO_REPLY;
-    /* Discard anything already buffered, as every other transaction here does.
-     * This is the first bus traffic after init and the broadcast torque-off,
-     * and a single leftover byte shifts the status header by one, which
-     * dxl_read_status rejects outright rather than resynchronizing. */
-    while (head_board_branch_read_available(joint->branch_index, response,
-                                            sizeof(response)) != 0u) {
+    /* The ping is the first transaction against each servo and the only one
+     * that does not go through dxl_read_register(), so it needs its own retry:
+     * without it a single lost transfer still rejects a healthy servo as
+     * NO_REPLY and fails the whole inventory. */
+    bool ping_answered = false;
+    for (uint8_t attempt = 0u; attempt <= DXL_DISCOVERY_READ_RETRIES && !ping_answered;
+         ++attempt) {
+      response_length = 0u;
+      /* Discard anything already buffered, as every other transaction here
+       * does. This is the first bus traffic after init and the broadcast
+       * torque-off, and a single leftover byte shifts the status header by
+       * one, which dxl_read_status rejects outright rather than
+       * resynchronizing. */
+      while (head_board_branch_read_available(joint->branch_index, response,
+                                              sizeof(response)) != 0u) {
+      }
+      if (size != 0u &&
+          head_board_branch_write(joint->branch_index, request, size) == 0 &&
+          dxl_read_status(joint->branch_index, response, sizeof(response), 2500u,
+                          &response_length) == 0 &&
+          response_length >= 14u &&
+          dxl_status_valid(response, response_length, joint->servo_id)) {
+        ping_answered = true;
+      } else if (attempt < DXL_DISCOVERY_READ_RETRIES && read_retry_count < UINT16_MAX) {
+        ++read_retry_count;
+      }
     }
-    if (size == 0u || head_board_branch_write(joint->branch_index, request, size) != 0 ||
-        dxl_read_status(joint->branch_index, response, sizeof(response), 2500u,
-                        &response_length) != 0 ||
-        response_length < 14u ||
-        !dxl_status_valid(response, response_length, joint->servo_id)) continue;
+    if (!ping_answered) continue;
     /* Bit 7 is the Protocol 2.0 Hardware Alert: the servo answered, but its
      * Hardware Error Status (address 70) is latched non-zero. Do not reject
      * here. An alert caused by a voltage limit this firmware itself wrote can
@@ -900,8 +1115,17 @@ int head_dxl_discover(struct head_runtime *runtime,
                             (const uint8_t[]){ 10u, 0u, 0u, 0u }, 4u) != 0 ||
         dxl_ensure_register(joint->branch_index, joint->servo_id, 31u,
                             (const uint8_t[]){ 70u }, 1u) != 0 ||
+        /* Max Voltage Limit is the servo's own instantaneous trip, not an
+         * operating rating, so it is held at the ROBOTIS factory default of
+         * 14.0 V rather than the 12.0 V steady-state maximum. A decelerating
+         * motor regenerates into a rail a CV bench supply cannot sink, and on
+         * an 11.1 V supply that kick clears 12.0 V easily -- latching an Input
+         * Voltage Error (Hardware Error Status bit 0) on an entirely healthy
+         * bench. Supply voltage is still held to the datasheet range: phase 3
+         * of preparation range-checks Present Input Voltage against
+         * DXL_MAXIMUM_SAFE_VOLTAGE_MV before any torque-on. */
         dxl_ensure_register(joint->branch_index, joint->servo_id, 32u,
-                            (const uint8_t[]){ 120u, 0u }, 2u) != 0 ||
+                            (const uint8_t[]){ 140u, 0u }, 2u) != 0 ||
         dxl_ensure_register(joint->branch_index, joint->servo_id, 34u,
                             (const uint8_t[]){ 65u, 0u }, 2u) != 0 ||
         dxl_ensure_register(joint->branch_index, joint->servo_id, 36u,
@@ -916,7 +1140,14 @@ int head_dxl_discover(struct head_runtime *runtime,
       uint16_t address;
       uint16_t value;
     } gains[] = {
-      { 76u, 1200u }, { 78u, 40u }, { 80u, 0u }, { 82u, 0u },
+      /* Position D (80) departs from the factory 0. A bare horn behind a
+       * 180.62:1 gearbox reflects almost no inertia and has real lash, so a
+       * P-only loop chases the output through the backlash band and sustains
+       * its own oscillation -- damping it by hand collapses the cycle and it
+       * then holds rigidly, which is the signature. D supplies that damping
+       * instead of a finger. Harmless once a joint is loaded; necessary while
+       * it is not. */
+      { 76u, 1200u }, { 78u, 40u }, { 80u, 1000u }, { 82u, 0u },
       { 84u, 900u }, { 88u, 0u }, { 90u, 0u },
     };
     bool gains_valid = true;
@@ -967,6 +1198,7 @@ int head_dxl_discover(struct head_runtime *runtime,
     ++online;
   }
   alert_tolerant_configuration = false;
+  read_retry_attempts = 0u;
   return online == calibration->expected_servo_count ? 0 : -ENODEV;
 }
 
@@ -1048,6 +1280,7 @@ static void telemetry_consume(struct head_runtime *runtime,
       state->present_voltage_mv *= 100u; /* register unit is 0.1 V */
       state->temperature_c = parameters[77];              /* address 146 */
       state->last_feedback_ms = now_ms;
+      state->last_current_feedback_ms = now_ms;
       health->telemetry_received_mask |= (uint8_t)(1u << (index % HEAD_SERVOS_PER_BRANCH));
     } else {
       ++health->protocol_errors;
@@ -1080,6 +1313,12 @@ void head_dxl_telemetry_tick(struct head_runtime *runtime,
         }
         ++health->telemetry_timeouts;
         health->telemetry_active = false;
+        /* A branch whose receiver has starved never reports RX_DISABLED, so
+         * head_board_branch_read_available() never re-arms it and every later
+         * poll times out identically until reboot. Recover it here: the reply
+         * for this cycle is already lost, and a healthy branch that simply
+         * missed one reply is re-armed harmlessly. */
+        if (head_board_branch_rx_restart(branch_index) != 0) ++health->bus_errors;
       }
       continue;
     }

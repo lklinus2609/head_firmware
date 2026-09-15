@@ -10,6 +10,8 @@
 void head_config_default(struct head_calibration *calibration);
 void head_config_finalize(struct head_calibration *calibration);
 bool head_config_validate(const struct head_calibration *calibration);
+uint32_t head_config_operating_current_branch_ma(
+    const struct head_calibration *calibration, uint8_t branch_index);
 int head_config_load(struct head_calibration *calibration);
 int head_config_save(const struct head_calibration *calibration);
 int head_config_serialize(const struct head_calibration *calibration,

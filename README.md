@@ -154,7 +154,7 @@ the same arrangement.
 | Position command | Protocol v2 normalized `POSITION` implemented |
 | Position + velocity / velocity-only | Represented in v2 but explicitly rejected pending control-law validation |
 | Servo safety commissioning | Requires firmware v38+ (v46+ for Startup Configuration), mode 5, Protocol 2.0, 1 Mbps, Secondary ID disabled, conservative thermal/voltage/PWM/current/shutdown limits, normalized gains, safe startup torque, and watchdog readback |
-| Per-servo current | Calibration v4 separates operating and homing current limits and writes them before torque enable |
+| Servo current | Calibration v4 separates operating and homing limits; each physical branch's active operating limits must fit a 2,500 mA budget, checked first before torque-on and supervised independently from fresh live current telemetry |
 | 500 Hz fixed-period scheduling | Absolute scheduler and parallel DMA TX implemented; target measurement pending |
 | 100 Hz telemetry | Full five-servo branch response is staged/drained; single-owner schedule implemented; hardware acceptance pending |
 | Present velocity / feedback age | Implemented in v2 state |
@@ -190,18 +190,26 @@ not additional actuator states in the Teensy firmware.
 Use the Zephyr 3.7.2 LTS workspace and the production storage configuration:
 
 ```bash
-cd /home/linus/project_HEAD/firmware
-source /home/linus/head_zephyr_ws/.venv/bin/activate
-west build -p always -b teensy41 -d builds/production zephyr -- \
+cd ~/project_HEAD/firmware
+.venv/bin/west build -p always -b teensy41 -d builds/production zephyr -- \
   -DCONF_FILE="prj.conf;prj_production_storage.conf" \
   -DDTC_OVERLAY_FILE=teensy41.overlay
 ```
+
+The trailing `zephyr` is the application source directory and is required:
+`west build` is run from `firmware/`, but the application lives in
+`firmware/zephyr/`. Omitting it fails with *source directory "." does not
+contain a CMakeLists.txt*. Because `-p always` wipes the build directory before
+configuring, that failure also destroys the previous image — always pass the
+board, source directory, and CMake flags in full rather than relying on a
+cached configuration.
+
 
 For USB-only work with actuator power physically disconnected, use the no-12 V
 bench image:
 
 ```bash
-west build -p always -b teensy41 -d builds/bench-no-12v zephyr -- \
+.venv/bin/west build -p always -b teensy41 -d builds/bench-no-12v zephyr -- \
   -DHEAD_BENCH_NO_12V=ON \
   -DCONF_FILE="prj.conf;prj_bench_no_12v.conf" \
   -DDTC_OVERLAY_FILE=teensy41_bench_no_12v.overlay

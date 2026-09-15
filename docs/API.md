@@ -69,6 +69,18 @@ Dynamixel velocity operating mode.
 - Any confirmed serious controller, servo, bus, telemetry, watchdog, homing,
   or cooling fault requests torque-disable on all active branches and latches
   `FAULT`.
+- The sum of `operating_current_ma` for the active servos on each physical
+  branch must not exceed 2,500 mA. This is the first motion-preparation safety
+  gate and is independent of the other branches. While torque may be on, each
+  branch is checked as soon as all of its active servos have fresh current
+  telemetry; exceeding 2,500 mA latches `BRANCH_CURRENT_BUDGET` and requests
+  verified whole-head torque shutdown. The nominal threshold is 500 mA below
+  each branch's 3 A fuse rating. However, this is a sum of actuator-reported
+  motor current rather than a direct branch-supply measurement, so wiring
+  faults and fast input-current transients still rely on the fuse and physical
+  supply disconnect. There is no whole-head servo-current admission or trip
+  limit; four branches may therefore have up to 10,000 mA of configured servo
+  current in aggregate.
 - `START_PROPRIOCEPTION` is accepted only from torque-off `READY` with a valid
   lease and fresh actuator feedback. It seeds and verifies fresh measured positions before torque-on, rejects joint targets, and keeps refreshing those fixed goals while
   feedback continues. `DISABLE`, lease loss, or any fault exits through the

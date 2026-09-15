@@ -68,6 +68,9 @@ enum head_message_type {
   /* Torque-off commissioning aid: read any control-table register. */
   HEAD_MSG_DEBUG_READ,
   HEAD_MSG_DEBUG_READ_RESULT,
+  /* Homing for a joint with no mechanical stop: drive each active servo to the
+   * nearest encoder zero and take that as its reference. */
+  HEAD_MSG_ZERO_HOME,
 };
 
 struct head_frame {

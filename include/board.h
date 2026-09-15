@@ -33,6 +33,8 @@ size_t head_board_branch_read_available(uint8_t branch_index, uint8_t *data,
  * system workqueue. Callers must therefore sleep rather than poll; a busy
  * wait starves that work item and the reply is never delivered. */
 int head_board_branch_wait_rx(uint8_t branch_index, uint32_t timeout_us);
+/* Recover a receiver that stopped consuming without reporting RX_DISABLED. */
+int head_board_branch_rx_restart(uint8_t branch_index);
 /* Branch-lifetime RX health counters, for diagnosing dropped replies. */
 void head_board_branch_rx_stats(uint8_t branch_index, uint16_t *disabled,
                                 uint16_t *restart_failures, uint16_t *overflows);

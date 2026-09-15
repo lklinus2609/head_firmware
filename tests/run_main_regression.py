@@ -18,6 +18,8 @@ PREAMBLE = r'''
 #include <errno.h>
 #include <stdio.h>
 #include "head.h"
+#include "config.h"
+#include "control.h"
 #include "state_machine.h"
 #include "lease.h"
 static struct head_runtime runtime;
@@ -44,6 +46,7 @@ TESTS = r'''
 static void reset_fixture(void)
 {
   runtime = (struct head_runtime){0};
+  calibration = (struct head_calibration){0};
   runtime.state = HEAD_READY;
   runtime.discovery_verified = true;
   runtime.torque_state = HEAD_TORQUE_OFF_VERIFIED;
@@ -54,6 +57,41 @@ static void reset_fixture(void)
 }
 int main(void)
 {
+  reset_fixture();
+  calibration.active_servo_mask = 7u;
+  calibration.joints[0].operating_current_ma = 900;
+  calibration.joints[1].operating_current_ma = 900;
+  calibration.joints[2].operating_current_ma = 701;
+  begin_preparation_locked(HEAD_ENABLED);
+  service_preparation_locked();
+  assert(step_count == 0u && runtime.fault == HEAD_FAULT_BRANCH_CURRENT_BUDGET);
+  assert(runtime.shutdown_requested && !runtime.preparation_active);
+
+  reset_fixture();
+  runtime.state = HEAD_ENABLED;
+  runtime.torque_state = HEAD_TORQUE_ON_VERIFIED;
+  runtime.preparation_completed_ms = 90u;
+  calibration.active_servo_mask = 1u;
+  runtime.servos[0].last_current_feedback_ms = 100u;
+  runtime.servos[0].present_current_ma = 2500;
+  service_branch_current_budget_locked(100u);
+  assert(runtime.fault == HEAD_FAULT_NONE && !runtime.shutdown_requested);
+  runtime.servos[0].present_current_ma = 2501;
+  service_branch_current_budget_locked(100u);
+  assert(runtime.fault == HEAD_FAULT_BRANCH_CURRENT_BUDGET);
+  assert(runtime.shutdown_requested);
+
+  /* Stale current feedback on another branch must not block this trip. */
+  reset_fixture();
+  runtime.state = HEAD_ENABLED;
+  runtime.torque_state = HEAD_TORQUE_ON_VERIFIED;
+  runtime.preparation_completed_ms = 90u;
+  calibration.active_servo_mask = (1u << 0u) | (1u << 5u);
+  runtime.servos[0].last_current_feedback_ms = 100u;
+  runtime.servos[0].present_current_ma = 2501;
+  service_branch_current_budget_locked(100u);
+  assert(runtime.fault == HEAD_FAULT_BRANCH_CURRENT_BUDGET);
+
   reset_fixture();
   begin_preparation_locked(HEAD_ENABLED);
   assert(runtime.preparation_active);
@@ -114,6 +152,7 @@ def main():
         executable = Path(directory) / 'main_regression'
         source.write_text(PREAMBLE + function('static void begin_preparation_locked') +
                           function('static void service_preparation_locked') +
+                          function('static void service_branch_current_budget_locked') +
                           function('static int service_shutdown_locked') + TESTS)
         subprocess.run(['cc', '-std=c99', '-Wall', '-Wextra', '-Wconversion', '-Wshadow',
                         '-Werror', '-fsanitize=undefined', '-I' + str(ROOT / 'firmware/include'),

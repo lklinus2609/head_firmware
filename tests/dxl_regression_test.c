@@ -103,6 +103,12 @@ int head_board_branch_set_baud(uint8_t branch_index, uint32_t baudrate)
 { (void)branch_index; (void)baudrate; return 0; }
 int head_board_branch_set_tx(uint8_t branch_index, bool tx)
 { (void)branch_index; (void)tx; return 0; }
+unsigned int board_rx_restarts[HEAD_BRANCH_COUNT];
+int head_board_branch_rx_restart(uint8_t branch_index)
+{
+  if (branch_index < HEAD_BRANCH_COUNT) ++board_rx_restarts[branch_index];
+  return 0;
+}
 int head_board_release_all(void) { return 0; }
 uint32_t head_board_branch_error_flags(uint8_t branch_index)
 { (void)branch_index; return 0u; }

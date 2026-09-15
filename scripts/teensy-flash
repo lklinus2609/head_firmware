@@ -1,0 +1,57 @@
+#!/bin/sh
+# Flash a built image to the Teensy 4.1 in one command.
+#
+# Two separate problems make a bare `west flash` need running twice:
+#
+# 1. Zephyr's `teensy` runner calls `teensy_loader_cli --mcu TEENSY41 <hex>`
+#    with no -s and no -w. That is a single shot at a board still running its
+#    application, where HalfKay is not enumerated, so it finds nothing. The
+#    first invocation is what reboots the board; only the second lands.
+#
+# 2. With -s -w the reboot and the wait both work, but HalfKay enumerates a
+#    moment before it will accept a write, and the loader programs immediately:
+#    "Found HalfKay Bootloader / Programming...error writing to Teensy".
+#    teensy_loader_cli has no settle-delay option, so retry after a pause. The
+#    board is already sitting in HalfKay by then, so the retry needs only -w.
+#
+# This is a retry around a race in the loader, not a fix for it.
+#
+# Usage: scripts/teensy-flash [build-dir]     (default: builds/bench-j3-n5)
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+firmware_dir=$(dirname -- "$script_dir")
+build_dir=${1:-builds/bench-j3-n5}
+
+case $build_dir in
+  /*) ;;
+   *) build_dir=$firmware_dir/$build_dir ;;
+esac
+
+hex=$build_dir/zephyr/zephyr.hex
+[ -f "$hex" ] || { echo "teensy-flash: no image at $hex" >&2; exit 1; }
+
+echo "teensy-flash: $hex"
+
+attempt=1
+max=4
+while :; do
+  if [ "$attempt" -eq 1 ]; then
+    # Ask the running firmware to reboot into HalfKay, then wait for it.
+    set -- -s -w
+  else
+    # Already in HalfKay; just wait for it and program.
+    set -- -w
+  fi
+  if teensy_loader_cli --mcu=TEENSY41 "$@" -v "$hex"; then
+    exit 0
+  fi
+  if [ "$attempt" -ge "$max" ]; then
+    echo "teensy-flash: giving up after $max attempts" >&2
+    echo "teensy-flash: press the Teensy program button, then re-run" >&2
+    exit 1
+  fi
+  echo "teensy-flash: write failed, settling and retrying ($attempt/$max)" >&2
+  sleep 1
+  attempt=$((attempt + 1))
+done

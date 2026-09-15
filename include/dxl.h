@@ -73,6 +73,9 @@ void head_dxl_last_transaction_error(uint16_t *address, uint8_t *status);
 int head_dxl_debug_read(uint8_t branch_index, uint8_t servo_id, uint16_t address,
                         uint8_t length, uint8_t *data);
 
+/* Saturating total of retried transfers: transient bus loss stays visible
+ * instead of being silently absorbed by the retries. */
+uint16_t head_dxl_read_retry_count(void);
 uint32_t head_dxl_take_hardware_alert_mask(void);
 int head_dxl_init(void);
 /* Sequential read-only Protocol 2.0 Pings. It never writes Torque Enable,

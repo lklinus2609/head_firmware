@@ -173,6 +173,25 @@ int32_t head_control_target_tick(const struct head_runtime *runtime,
   return clamp_i32(target, minimum, maximum);
 }
 
+uint32_t head_control_present_current_branch_ma(
+    const struct head_runtime *runtime,
+    const struct head_calibration *calibration,
+    uint8_t branch_index)
+{
+  uint32_t total_current_ma = 0u;
+  if (runtime == NULL || calibration == NULL || branch_index >= HEAD_BRANCH_COUNT) {
+    return UINT32_MAX;
+  }
+  const uint8_t first_servo = branch_index * HEAD_SERVOS_PER_BRANCH;
+  const uint8_t end_servo = first_servo + HEAD_SERVOS_PER_BRANCH;
+  for (uint8_t servo_index = first_servo; servo_index < end_servo; ++servo_index) {
+    if (!is_active(calibration, servo_index)) continue;
+    const int32_t current_ma = runtime->servos[servo_index].present_current_ma;
+    total_current_ma += (uint32_t)(current_ma < 0 ? -current_ma : current_ma);
+  }
+  return total_current_ma;
+}
+
 void head_control_tick(struct head_runtime *runtime,
                        const struct head_calibration *calibration,
                        uint32_t now_ms)

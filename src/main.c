@@ -92,10 +92,22 @@ void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf)
 #endif
 }
 
-#if !defined(HEAD_BENCH_NO_12V)
+/* A build without the watchdog subsystem is a deliberate bench configuration,
+ * not a runtime failure, so it must not fault at boot. Enforce the guarantee
+ * where it belongs instead: any image that is not one of the bench profiles
+ * fails to compile unless CONFIG_WATCHDOG is enabled. That is strictly
+ * stronger than the boot-time fault it replaces -- a production image can no
+ * longer be built without a watchdog at all, rather than being built and then
+ * reporting it. */
+#if !defined(CONFIG_WATCHDOG) && !defined(HEAD_BENCH_NO_12V) && \
+    !defined(HEAD_BENCH_NO_FAN) && !defined(HEAD_BENCH_J3_ID10)
+#error "Production images require CONFIG_WATCHDOG; add prj_production_storage.conf"
+#endif
+
+#if !defined(HEAD_BENCH_NO_12V) && defined(CONFIG_WATCHDOG)
 static int hardware_watchdog_start(void)
 {
-#if DT_NODE_HAS_STATUS(DT_NODELABEL(wdog0), okay) && defined(CONFIG_WATCHDOG)
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(wdog0), okay)
   const struct wdt_timeout_cfg timeout = {
     .window = { .min = 0u, .max = 1000u },
     .callback = NULL,
@@ -490,7 +502,8 @@ static bool active_feedback_fresh(uint32_t now_ms)
     if ((calibration.active_servo_mask & (1u << index)) == 0u) continue;
     const struct head_servo_state *servo = &runtime.servos[index];
     if (!servo->online || servo->last_feedback_ms == 0u ||
-        now_ms - servo->last_feedback_ms > 30u || servo->hardware_error != 0u) return false;
+        now_ms - servo->last_feedback_ms > HEAD_COMMAND_FEEDBACK_FRESH_MS ||
+        servo->hardware_error != 0u) return false;
   }
   return true;
 }
@@ -527,6 +540,16 @@ static void begin_preparation_locked(enum head_state target_state)
 static void service_preparation_locked(void)
 {
   const uint32_t started_ms = k_uptime_get_32();
+  /* Branch current is the first motion-preparation safety gate. This check is
+   * independent of config validation so a corrupted in-memory profile cannot
+   * reach the torque-enable sequence. */
+  for (uint8_t branch_index = 0u; branch_index < HEAD_BRANCH_COUNT; ++branch_index) {
+    if (head_config_operating_current_branch_ma(&calibration, branch_index) >
+        HEAD_BRANCH_CURRENT_BUDGET_MA) {
+      head_state_fault(&runtime, HEAD_FAULT_BRANCH_CURRENT_BUDGET);
+      return;
+    }
+  }
   if (head_lease_is_expired(&runtime, started_ms) ||
       started_ms - runtime.preparation_started_ms > 1500u) {
     head_state_fault(&runtime, HEAD_FAULT_WATCHDOG);
@@ -549,6 +572,40 @@ static void service_preparation_locked(void)
     runtime.accepted_sequence_valid = false;
     runtime.pending_transmit_valid = false;
     runtime.watchdog_hold_started_ms = 0u;
+  }
+}
+
+static void service_branch_current_budget_locked(uint32_t now_ms)
+{
+  if (runtime.shutdown_requested || runtime.preparation_active ||
+      !head_state_torque_may_be_on(&runtime)) {
+    return;
+  }
+
+  /* Evaluate each branch as soon as that branch has a complete, fresh current
+   * sample. A slow or absent response elsewhere must not delay over-current
+   * shutdown for this branch. */
+  for (uint8_t branch_index = 0u; branch_index < HEAD_BRANCH_COUNT;
+       ++branch_index) {
+    bool branch_current_feedback_fresh = true;
+    const uint8_t first_servo = branch_index * HEAD_SERVOS_PER_BRANCH;
+    const uint8_t end_servo = first_servo + HEAD_SERVOS_PER_BRANCH;
+    for (uint8_t index = first_servo; index < end_servo; ++index) {
+      if ((calibration.active_servo_mask & (1u << index)) == 0u) continue;
+      const uint32_t feedback_ms = runtime.servos[index].last_current_feedback_ms;
+      if (feedback_ms == 0u || now_ms - feedback_ms > 30u ||
+          (int32_t)(feedback_ms - runtime.preparation_completed_ms) < 0) {
+        branch_current_feedback_fresh = false;
+        break;
+      }
+    }
+    if (branch_current_feedback_fresh &&
+        head_control_present_current_branch_ma(&runtime, &calibration,
+                                               branch_index) >
+            HEAD_BRANCH_CURRENT_BUDGET_MA) {
+      head_state_fault(&runtime, HEAD_FAULT_BRANCH_CURRENT_BUDGET);
+      return;
+    }
   }
 }
 
@@ -660,8 +717,10 @@ static void send_diagnostics(void)
   put_u32(payload, &byte_offset, (uint32_t)atomic_get(&usb_tx_dropped_bytes));
   put_u32(payload, &byte_offset, (uint32_t)atomic_get(&usb_tx_coalesced_frames));
   payload[byte_offset++] = (uint8_t)runtime.storage_state;
-  payload[byte_offset++] = 0u;
-  payload[byte_offset++] = 0u;
+  /* Two of the three reserved bytes carry the retried-transfer total, so the
+   * bus loss rate the retries absorb stays observable without changing the
+   * fixed diagnostics payload length. */
+  put_u16(payload, &byte_offset, head_dxl_read_retry_count());
   payload[byte_offset++] = 0u;
   put_u32(payload, &byte_offset, (uint32_t)runtime.storage_result);
   put_u32(payload, &byte_offset, head_config_generation());
@@ -807,6 +866,15 @@ static void dispatch_frame(const struct head_frame *frame)
       result = 0;
     }
     break;
+  case HEAD_MSG_ZERO_HOME:
+    if (frame->length == 8u && token_matches(frame, now) && head_state_can_prepare_motion(&runtime) && active_feedback_fresh(now) &&
+      head_state_request_zero_home(&runtime, &calibration)) {
+      runtime.homing_index = next_active_servo(0u);
+      runtime.homing_torque_index = UINT8_MAX;
+      begin_preparation_locked(runtime.state);
+      result = 0;
+    }
+    break;
   case HEAD_MSG_MAINTENANCE_CALIBRATE:
     if (frame->length == 8u && token_matches(frame, now) && head_state_can_prepare_motion(&runtime) && active_feedback_fresh(now) &&
       head_state_request_maintenance_calibration(&runtime, &calibration)) {
@@ -873,14 +941,28 @@ static void dispatch_frame(const struct head_frame *frame)
       result = service_shutdown_locked(now);
     }
     break;
-  case HEAD_MSG_CLEAR_FAULT:
+  case HEAD_MSG_CLEAR_FAULT: {
+    /* A discovery failure on a silent bus parks the shutdown sweep in
+     * SHUTDOWN_FAILED and leaves shutdown_requested set forever, so the
+     * ordinary OFF_VERIFIED precondition can never be met and a power cycle
+     * returns to the identical state. Admit the retry when torque was never
+     * commanded on; the sweep's own verification is left untouched. */
+    const bool never_energized = head_state_torque_never_commanded_on(&runtime);
     if (frame->length == 8u && token_matches(frame, now) && runtime.state == HEAD_FAULT &&
-        runtime.torque_state == HEAD_TORQUE_OFF_VERIFIED && !runtime.shutdown_requested &&
+        (runtime.torque_state == HEAD_TORQUE_OFF_VERIFIED || never_energized) &&
+        (!runtime.shutdown_requested || never_energized) &&
         !runtime.discovery_active && !runtime.preparation_active && !runtime.diagnostic_active &&
         runtime.storage_state != HEAD_STORAGE_PENDING && runtime.storage_state != HEAD_STORAGE_WRITING) {
       if (!head_config_validate(&calibration)) {
         result = -EINVAL;
       } else {
+        /* discover_inventory_locked() aborts with -ECANCELED while a shutdown
+         * is outstanding, and it opens with its own broadcast Torque Enable=0,
+         * so retract the stuck request rather than race it. The discovery
+         * thread reinstates it if the sweep fails again. */
+        runtime.shutdown_requested = false;
+        runtime.shutdown_confirmations = 0u;
+        runtime.shutdown_next_attempt_ms = 0u;
         runtime.discovery_active = true;
         runtime.discovery_verified = false;
         discovery_transaction_id = transaction_id;
@@ -890,6 +972,7 @@ static void dispatch_frame(const struct head_frame *frame)
       }
     }
     break;
+  }
   case HEAD_MSG_FAN_OVERRIDE:
     if (token_matches(frame, now) && frame->length == 9u) {
       runtime.fan_override = frame->payload[4] <= 100u;
@@ -967,7 +1050,9 @@ static void dispatch_frame(const struct head_frame *frame)
      * is restored to the production default rate before replying. */
     if (branch_index < HEAD_BRANCH_COUNT && probe_baud_supported(baudrate) &&
         !runtime.discovery_active && !runtime.diagnostic_active && !runtime.preparation_active &&
-        !head_state_torque_may_be_on(&runtime) && runtime.state != HEAD_HOMING &&
+        (!head_state_torque_may_be_on(&runtime) ||
+         head_state_torque_never_commanded_on(&runtime)) &&
+        runtime.state != HEAD_HOMING &&
         runtime.state != HEAD_MAINTENANCE_CALIBRATION &&
         runtime.state != HEAD_ENABLED) {
       /* Telemetry Sync Read keeps polling every branch even in HEAD_READY.
@@ -998,7 +1083,9 @@ static void dispatch_frame(const struct head_frame *frame)
     }
     if (branch_index < HEAD_BRANCH_COUNT && servo_id < DXL_BROADCAST_ID &&
         probe_baud_supported(baudrate) && !runtime.discovery_active && !runtime.diagnostic_active &&
-        !runtime.preparation_active && !head_state_torque_may_be_on(&runtime) &&
+        !runtime.preparation_active &&
+        (!head_state_torque_may_be_on(&runtime) ||
+         head_state_torque_never_commanded_on(&runtime)) &&
         runtime.state != HEAD_HOMING &&
         runtime.state != HEAD_MAINTENANCE_CALIBRATION &&
         runtime.state != HEAD_ENABLED) {
@@ -1032,7 +1119,9 @@ static void dispatch_frame(const struct head_frame *frame)
     if (branch_index < HEAD_BRANCH_COUNT && servo_id < DXL_BROADCAST_ID &&
         length != 0u && length <= sizeof(data) && !runtime.discovery_active &&
         !runtime.diagnostic_active && !runtime.preparation_active &&
-        !head_state_torque_may_be_on(&runtime) && runtime.state != HEAD_HOMING &&
+        (!head_state_torque_may_be_on(&runtime) ||
+         head_state_torque_never_commanded_on(&runtime)) &&
+        runtime.state != HEAD_HOMING &&
         runtime.state != HEAD_MAINTENANCE_CALIBRATION &&
         runtime.state != HEAD_ENABLED) {
       head_dxl_abort_telemetry(&runtime);
@@ -1055,11 +1144,26 @@ static void dispatch_frame(const struct head_frame *frame)
   case HEAD_MSG_UART_TX_METER_TEST:
   case HEAD_MSG_UART_RX_LINE_TEST: {
     const bool line_mode = frame->type == HEAD_MSG_LINE_MODE_TEST;
+    /* These three diagnostics are the tools for finding out why a branch is
+     * silent, but HEAD_TORQUE_OFF_VERIFIED is only reachable through a
+     * successful discovery -- so a dead branch locks the very test that would
+     * diagnose it, and a branch that never answers can never be measured.
+     * Under the bench flag, admit the same never-energized retry that
+     * HEAD_MSG_CLEAR_FAULT and profile staging already allow for the identical
+     * reason. All three are torque-off by construction: line-test only drives
+     * the direction pin, the TX meter sends a torque-safe zero-byte stream,
+     * and the RX test only listens. */
+#if defined(HEAD_BENCH_LINE_TEST_UNGATED)
+    const bool diagnostic_never_energized = head_state_torque_never_commanded_on(&runtime);
+#else
+    const bool diagnostic_never_energized = false;
+#endif
     if (frame->length == (line_mode ? 6u : 5u) &&
         frame->payload[0] < HEAD_BRANCH_COUNT &&
         (!line_mode || frame->payload[1] <= 1u) &&
-        runtime.torque_state == HEAD_TORQUE_OFF_VERIFIED &&
-        !runtime.shutdown_requested && !runtime.discovery_active && !runtime.preparation_active &&
+        (runtime.torque_state == HEAD_TORQUE_OFF_VERIFIED || diagnostic_never_energized) &&
+        (!runtime.shutdown_requested || diagnostic_never_energized) &&
+        !runtime.discovery_active && !runtime.preparation_active &&
         !runtime.diagnostic_active &&
         runtime.storage_state != HEAD_STORAGE_PENDING &&
         runtime.storage_state != HEAD_STORAGE_WRITING) {
@@ -1274,12 +1378,18 @@ static void telemetry_thread(void *a, void *b, void *c)
         runtime.state == HEAD_PROPRIOCEPTION_HOLD ||
         runtime.state == HEAD_ROUTING) {
       const uint32_t now = k_uptime_get_32();
+      service_branch_current_budget_locked(now);
       if (!runtime.shutdown_requested && !runtime.preparation_active &&
           now - runtime.preparation_completed_ms > 30u && head_state_torque_may_be_on(&runtime)) {
         for (uint8_t index = 0; index < HEAD_SERVO_COUNT; ++index) {
           if ((calibration.active_servo_mask & (1u << index)) == 0u) continue;
-          if (!runtime.servos[index].online ||
-              now - runtime.servos[index].last_feedback_ms > 30u) {
+          /* Age alone, not servo->online: telemetry clears online after a
+           * single timed-out Sync Read and restores it on the next good one,
+           * so online flaps on any lost reply while the feedback driving the
+           * servos is still current. Age is what actually says whether torque
+           * is being held on stale data. */
+          if (now - runtime.servos[index].last_feedback_ms >
+              HEAD_TELEMETRY_STALE_FAULT_MS) {
             head_state_fault(&runtime, HEAD_FAULT_TELEMETRY);
             break;
           }
@@ -1347,6 +1457,11 @@ static void discovery_thread(void *first, void *second, void *third)
       runtime.fault = HEAD_FAULT_NONE;
       runtime.state = HEAD_HOMING_REQUIRED;
       runtime.torque_state = HEAD_TORQUE_OFF_VERIFIED;
+    } else {
+      /* A clear-fault retry retracts the outstanding shutdown request to let
+       * this sweep run. Reinstate it on failure so torque is never left
+       * unverified without the supervisor trying to confirm it off. */
+      head_state_fault(&runtime, HEAD_FAULT_DISCOVERY);
     }
     const uint32_t lease_token = runtime.active_lease_token;
     const uint32_t transaction_id = discovery_transaction_id;
@@ -1366,9 +1481,22 @@ static void storage_thread(void *a, void *b, void *c)
     k_sem_take(&storage_pending_sem, K_FOREVER);
     while (true) {
       k_mutex_lock(&head_lock, K_FOREVER);
+      /* HEAD_TORQUE_OFF_VERIFIED is only reached through a successful
+       * discovery, and discovery needs a committed profile -- so a board whose
+       * stored calibration is absent or no longer matches the hardware can
+       * never accept the profile that would repair it. Boot leaves such a
+       * board in HEAD_FAULT_CONFIGURATION with torque UNKNOWN, or in
+       * HEAD_FAULT_DISCOVERY with the shutdown sweep parked in
+       * SHUTDOWN_FAILED, and this wait then spins until the host times out.
+       * HEAD_MSG_CLEAR_FAULT already admits the same retry when torque was
+       * never commanded on; staging is torque-off and the commit path still
+       * validates in full, so grant it here for the identical reason. The
+       * sweep's own verification is left untouched. */
+      const bool never_energized = head_state_torque_never_commanded_on(&runtime);
       const bool ready = runtime.storage_state == HEAD_STORAGE_PENDING &&
-                         runtime.torque_state == HEAD_TORQUE_OFF_VERIFIED &&
-                         !runtime.shutdown_requested;
+                         (runtime.torque_state == HEAD_TORQUE_OFF_VERIFIED ||
+                          never_energized) &&
+                         (!runtime.shutdown_requested || never_energized);
       if (ready) runtime.storage_state = HEAD_STORAGE_WRITING;
       k_mutex_unlock(&head_lock);
       if (ready) break;
@@ -1430,6 +1558,94 @@ static void bringup_thread(void *a, void *b, void *c)
    * energized during host enumeration. */
   k_mutex_lock(&head_lock, K_FOREVER);
   (void)head_config_load(&calibration);
+#if defined(HEAD_BENCH_J3_ID10)
+  /* Volatile diagnostic profile: isolate J3 without modifying NVS. Keep the
+   * same conservative values used by the prior one-servo commissioning
+   * profile. This build remains motion-capable, so physical unloading and an
+   * external current limit are mandatory. */
+  head_config_default(&calibration);
+#if defined(HEAD_BENCH_J3_ALL)
+  /* Whole-branch variant: indices 10-14 are the five J3 servos.
+   * HEAD_BENCH_J3_COUNT narrows it to the first N of them so the servo count
+   * can be bisected: a single-servo Sync Read exchanges 88 bytes and a
+   * five-servo one 440, so a failure that appears only above some N separates
+   * a per-response problem from a whole-batch one. */
+#ifndef HEAD_BENCH_J3_COUNT
+#define HEAD_BENCH_J3_COUNT 5
+#endif
+  /* HEAD_BENCH_J3_START selects which J3 index the window begins at, so a
+   * single servo other than 10 can be brought up on its own. With COUNT=1 this
+   * homes 10, 11, 12, 13 or 14 individually -- the one-at-a-time sequence the
+   * hardware review already requires, and the only path that avoids the
+   * multi-member Sync Read defect. */
+#ifndef HEAD_BENCH_J3_START
+#define HEAD_BENCH_J3_START 10
+#endif
+  calibration.expected_servo_count = (uint8_t)HEAD_BENCH_J3_COUNT;
+  calibration.active_servo_mask =
+      (uint32_t)((1u << HEAD_BENCH_J3_COUNT) - 1u) << HEAD_BENCH_J3_START;
+#else
+  calibration.expected_servo_count = 1u;
+  calibration.active_servo_mask = 1u << 10u;
+#endif
+  calibration.allow_partial_inventory = 1u;
+  for (uint8_t bench_index = 10u; bench_index < 15u; ++bench_index) {
+  if ((calibration.active_servo_mask & (1u << bench_index)) == 0u) continue;
+  struct head_joint_config *joint = &calibration.joints[bench_index];
+  joint->homing_direction = 1.0f;
+  /* 2048 ticks is half a revolution on a 4096-tick encoder. The previous 100
+   * ticks was under nine degrees, and at 500 ticks/s it was spent in 200 ms --
+   * so the travel budget, not the timeout, ended every search, and homing only
+   * succeeded when the horn already happened to rest within nine degrees of
+   * its stop. The timeout must stay clear of the travel budget or it becomes
+   * the new binding limit: 2048 ticks at 500 ticks/s needs ~4.1 s. */
+  /* Two revolutions. The datum is tick 0 and the servo only holds a goal
+   * inside its 0..4095 Position Limit, so a joint cannot stop at the equivalent
+   * angle one turn up -- it has to unwind all the way down. Multi-turn Present
+   * Position accumulates while the joint is pushed around by hand, so allow
+   * more than the single revolution the angle itself would need. Power-cycling
+   * the servo resets the turn count and brings it back inside one revolution. */
+  joint->homing_max_travel_ticks = 8192;
+  joint->homing_timeout_ms = 6000u;
+  /* A third of the XC330-T181's 910 mA rating. The previous 100 mA was chosen
+   * so a bench mistake could not hurt anything, not from what the servo needs
+   * to turn: at roughly its no-load current the loop saturates just overcoming
+   * the gearbox, which is what made the horn stick, break free and overshoot
+   * instead of tracking the ramp. Still far too little to damage an unloaded
+   * horn, and well inside the 2500 mA per-branch budget. */
+  /* XC330-T181 Current Limit (38) factory default and maximum, per the ROBOTIS
+   * control table. In Operating Mode 5 this is the torque budget the position
+   * PID works within, so anything lower is a different controller from the one
+   * the factory gains were tuned for. */
+#if defined(HEAD_BENCH_J3_ALL)
+  /* head_config_validate() rejects a branch whose summed operating current
+   * exceeds HEAD_BRANCH_CURRENT_BUDGET_MA (2500 mA), and it sums the
+   * configured Current Limit(38) of every active servo as though all of them
+   * could draw it at once. Take the largest share that still fits, capped at
+   * the 910 mA rating: N<=2 therefore keeps the exact value the single-servo
+   * profile was commissioned with, and only N>=3 has to reduce it. That
+   * matters when bisecting by servo count -- a lower Current Limit is a
+   * different controller from the one the factory gains were tuned for (see
+   * above), so holding it constant keeps the comparison honest.
+   *
+   * The budget is conservative here: homing walks one servo at a time, so the
+   * real branch draw is one moving servo plus 17 mA standby each for the rest,
+   * nowhere near the 3 A branch fuse. */
+  joint->operating_current_ma =
+      (HEAD_BRANCH_CURRENT_BUDGET_MA / HEAD_BENCH_J3_COUNT) < 910 ?
+      (int16_t)(HEAD_BRANCH_CURRENT_BUDGET_MA / HEAD_BENCH_J3_COUNT) : 910;
+#else
+  joint->operating_current_ma = 910;
+#endif
+  joint->homing_current_ma = 150;
+  joint->homing_following_error_ticks = 0;
+  joint->homing_persistence_ms = 10u;
+  joint->homing_current_limit_ma = 250;
+  joint->homing_speed_ticks_per_second = 500u;
+  joint->homing_backoff_ticks = 5;
+  }
+  head_config_finalize(&calibration);
+#endif
   head_control_init(&runtime, &calibration);
   k_mutex_unlock(&head_lock);
 
@@ -1514,11 +1730,15 @@ int main(void)
   while (true) {
 #if !defined(HEAD_BENCH_NO_12V)
     if (atomic_get(&boot_complete) != 0 && !worker_threads_started) {
+#if defined(CONFIG_WATCHDOG)
+      /* Only a real start failure faults. "Not compiled in" is checked above
+       * at build time and never reaches here. */
       if (hardware_watchdog_start() != 0) {
         k_mutex_lock(&head_lock, K_FOREVER);
         head_state_fault(&runtime, HEAD_FAULT_WATCHDOG);
         k_mutex_unlock(&head_lock);
       }
+#endif
       k_thread_start(head_control_thread);
       k_thread_start(head_telemetry_thread);
       worker_threads_started = true;

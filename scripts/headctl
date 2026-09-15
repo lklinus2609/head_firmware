@@ -1,0 +1,30 @@
+#!/bin/sh
+# Location-independent launcher for headctl.py.
+#
+# Resolves everything from this script's own path, so it works from any working
+# directory. Prefers firmware/.venv (which carries pyserial) and falls back to
+# whatever python3 is active.
+set -eu
+
+script_path=$0
+# Follow symlinks so this can be linked into ~/.local/bin.
+while [ -L "$script_path" ]; do
+  link=$(readlink "$script_path")
+  case $link in
+    /*) script_path=$link ;;
+     *) script_path=$(dirname "$script_path")/$link ;;
+  esac
+done
+scripts_dir=$(CDPATH= cd -- "$(dirname -- "$script_path")" && pwd)
+firmware_dir=$(dirname -- "$scripts_dir")
+
+headctl_py=$firmware_dir/host_ros/src/head_ros/head_ros/headctl.py
+[ -f "$headctl_py" ] || { echo "headctl: cannot find $headctl_py" >&2; exit 1; }
+
+if [ -x "$firmware_dir/.venv/bin/python3" ]; then
+  python_bin=$firmware_dir/.venv/bin/python3
+else
+  python_bin=$(command -v python3) || { echo "headctl: no python3 found" >&2; exit 1; }
+fi
+
+exec "$python_bin" "$headctl_py" "$@"

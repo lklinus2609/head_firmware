@@ -175,11 +175,27 @@ def main() -> None:
     diagnostics = bytearray(headctl.DIAGNOSTICS_PAYLOAD_LENGTH)
     diagnostics[headctl.DIAGNOSTICS_STORAGE_STATE_OFFSET] = headctl.STORAGE_SUCCEEDED
     struct.pack_into("<iI", diagnostics, headctl.DIAGNOSTICS_STORAGE_RESULT_OFFSET, 0, 42)
-    assert headctl.decode_diagnostics(bytes(diagnostics)) == {
-        "storage_state": headctl.STORAGE_SUCCEEDED,
-        "storage_result": 0,
-        "generation": 42,
+    # Branch 2 (J3) carries one expected servo whose reply timed out twice:
+    # the shape of a delivery failure with a healthy servo.
+    struct.pack_into("<BBBBIIIIIIII", diagnostics,
+                     headctl.DIAGNOSTICS_BRANCH_OFFSET + 2 * headctl.BRANCH_RECORD_LENGTH,
+                     2, 0, 0x01, 0x00, 1000, 900, 2, 0, 0, 17, 1, 0)
+    report = headctl.decode_diagnostics(bytes(diagnostics))
+    assert report["storage_state"] == headctl.STORAGE_SUCCEEDED
+    assert report["storage_result"] == 0
+    assert report["generation"] == 42
+    assert report["discovery_reasons"] == [0] * 20
+    assert report["last_error_address"] == 0
+    assert report["last_error_status"] == 0
+    assert len(report["branches"]) == 4
+    assert report["branches"][2] == {
+        "index": 2, "active": 0, "expected_mask": 0x01, "received_mask": 0x00,
+        "requested_ms": 1000, "completed_ms": 900, "timeouts": 2,
+        "protocol_errors": 0, "bus_errors": 0, "transmissions": 17,
+        "transmission_errors": 1, "deferred": 0,
     }
+    assert report["branches"][0]["expected_mask"] == 0
+    assert report["branches"][0]["timeouts"] == 0
 
 
 if __name__ == "__main__":

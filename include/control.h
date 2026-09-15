@@ -25,5 +25,9 @@ void head_control_tick(struct head_runtime *runtime,
 int32_t head_control_target_tick(const struct head_runtime *runtime,
                                  const struct head_calibration *calibration,
                                  uint8_t servo_index);
+uint32_t head_control_present_current_branch_ma(
+    const struct head_runtime *runtime,
+    const struct head_calibration *calibration,
+    uint8_t branch_index);
 
 #endif

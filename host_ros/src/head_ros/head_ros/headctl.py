@@ -24,6 +24,7 @@ RENEW_LEASE = 32
 START_PROPRIOCEPTION = 33
 START_ROUTING = 34
 DEBUG_READ, DEBUG_READ_RESULT = 35, 36
+ZERO_HOME = 37
 
 SERIAL_READ_POLL_S = 0.001
 SERIAL_INTERFRAME_TIMEOUT_S = 0.05
@@ -33,7 +34,12 @@ HELLO_REPLY_LENGTH = 52
 # Layout: 14-byte prefix, 4 branches x 36, 12 bytes USB counters, then storage,
 # generation, boot cause, and one discovery-reason byte per servo.
 DIAGNOSTICS_PAYLOAD_LENGTH = 209
+# Per-branch health: 4 records of 36 bytes starting after the fixed header.
+DIAGNOSTICS_BRANCH_OFFSET = 14
+BRANCH_RECORD_LENGTH = 36
 DIAGNOSTICS_STORAGE_STATE_OFFSET = 170
+# Reserved bytes after storage_state now carry the retried-transfer total.
+DIAGNOSTICS_READ_RETRIES_OFFSET = 171
 DIAGNOSTICS_STORAGE_RESULT_OFFSET = 174
 DIAGNOSTICS_GENERATION_OFFSET = 178
 DIAGNOSTICS_DISCOVERY_REASON_OFFSET = 186
@@ -51,7 +57,19 @@ STATE_NAMES = ("BOOT", "RESERVED", "HOMING_REQUIRED", "HOMING",
                "MAINTENANCE_CALIBRATION", "READY", "ENABLED", "FAULT",
                "PROPRIOCEPTION_SETTLING", "PROPRIOCEPTION_HOLD", "ROUTING")
 FAULT_NAMES = ("NONE", "CONFIGURATION", "DISCOVERY", "HOMING", "WATCHDOG",
-               "BUS", "SERVO", "FAN", "CONTROL_DEADLINE", "TELEMETRY")
+               "BUS", "SERVO", "FAN", "CONTROL_DEADLINE", "TELEMETRY",
+               "LEGACY_CURRENT_BUDGET_RESERVED", "BRANCH_CURRENT_BUDGET")
+# enum head_torque_state. Reporting this as a boolean conflates OFF_VERIFIED
+# with the two shutdown states, which is exactly the distinction needed to tell
+# a safe controller from one whose torque-off sweep never confirmed.
+TORQUE_NAMES = ("unknown", "off_verified", "on_verified", "shutdown_pending",
+                "shutdown_failed")
+HEAD_SERVO_COUNT = 20
+# STATE payload: the fixed controller header, then one record per servo of
+# goal/present/velocity (i32 x3), current + voltage (u16 x2), temperature,
+# moving status, hardware error, online (u8 x4) and feedback age (u32).
+SERVO_BLOCK_OFFSET = 32
+SERVO_RECORD_LENGTH = 24
 
 
 def encode(message_type: int, payload: bytes = b"") -> bytes:
@@ -389,8 +407,23 @@ def decode_diagnostics(raw: bytes) -> dict:
         raise RuntimeError("malformed diagnostics response")
     reasons = raw[DIAGNOSTICS_DISCOVERY_REASON_OFFSET:
                   DIAGNOSTICS_DISCOVERY_REASON_OFFSET + 20]
+    branches = []
+    for branch in range(4):
+        offset = DIAGNOSTICS_BRANCH_OFFSET + branch * BRANCH_RECORD_LENGTH
+        (index, active, expected, received, requested_ms, completed_ms, timeouts,
+         protocol_errors, bus_errors, transmissions, transmission_errors,
+         deferred) = struct.unpack_from("<BBBBIIIIIIII", raw, offset)
+        branches.append({
+            "index": index, "active": active, "expected_mask": expected,
+            "received_mask": received, "requested_ms": requested_ms,
+            "completed_ms": completed_ms, "timeouts": timeouts,
+            "protocol_errors": protocol_errors, "bus_errors": bus_errors,
+            "transmissions": transmissions,
+            "transmission_errors": transmission_errors, "deferred": deferred})
     return {
+        "branches": branches,
         "storage_state": raw[DIAGNOSTICS_STORAGE_STATE_OFFSET],
+        "read_retries": struct.unpack_from("<H", raw, DIAGNOSTICS_READ_RETRIES_OFFSET)[0],
         "storage_result": struct.unpack_from("<i", raw, DIAGNOSTICS_STORAGE_RESULT_OFFSET)[0],
         "generation": struct.unpack_from("<I", raw, DIAGNOSTICS_GENERATION_OFFSET)[0],
         "discovery_reasons": list(reasons),
@@ -502,6 +535,26 @@ def acquire(device: Device) -> int:
     return struct.unpack_from("<I", payload, 2)[0]
 
 
+def wait_for_zero_home_hold(device: Device, token: int, timeout_s: float = 120.0) -> None:
+    """Zero homing settles into PROPRIOCEPTION_HOLD rather than torque-off READY."""
+    deadline_monotonic_s = time.monotonic() + timeout_s
+    next_lease_renewal_monotonic_s = time.monotonic() + 0.5
+    while time.monotonic() < deadline_monotonic_s:
+        frame = device.recv(min(0.1, deadline_monotonic_s - time.monotonic()))
+        if frame and frame[0] == STATE and frame[1]:
+            state = frame[1][0]
+            if state == 9:  # HEAD_PROPRIOCEPTION_HOLD
+                return
+            if state == 7:  # HEAD_FAULT
+                fault = frame[1][1] if len(frame[1]) > 1 else 0xFF
+                raise RuntimeError(f"zero homing faulted (fault {fault})")
+        if time.monotonic() >= next_lease_renewal_monotonic_s:
+            if not device.request(RENEW_LEASE, struct.pack("<I", token))[0]:
+                raise RuntimeError("control lease expired or was replaced during zero homing")
+            next_lease_renewal_monotonic_s = time.monotonic() + 0.5
+    raise RuntimeError("controller did not reach the zero-home hold")
+
+
 def wait_for_home_ready(device: Device, token: int, timeout_s: float = 120.0) -> None:
     deadline_monotonic_s = time.monotonic() + timeout_s
     next_lease_renewal_monotonic_s = time.monotonic() + 0.5
@@ -526,9 +579,10 @@ def main() -> None:
     parser.add_argument("--port", default="/dev/ttyACM1",
                         help="dedicated head protocol CDC port (default: /dev/ttyACM1)")
     parser.add_argument("command", choices=(
-        "status", "probe", "ping-debug", "read-register", "line-test", "uart-tx-test",
+        "status", "diagnostics", "probe", "ping-debug", "read-register", "line-test", "uart-tx-test",
         "uart-rx-test", "export-profile", "upload-profile", "home", "enable",
-        "proprioception", "routing", "disable", "clear-fault"))
+        "proprioception", "routing", "disable", "clear-fault", "release",
+        "zero-home"))
     parser.add_argument("--branch", type=int, choices=range(4), default=0,
                         help="physical branch: J1=0, J2=1, J3=2, J4=3")
     parser.add_argument("--baud", type=int, default=57600,
@@ -558,11 +612,95 @@ def main() -> None:
                         "<BBBBHI", frame[1], 0)
                     state_name = STATE_NAMES[state] if state < len(STATE_NAMES) else f"UNKNOWN({state})"
                     fault_name = FAULT_NAMES[fault] if fault < len(FAULT_NAMES) else f"UNKNOWN({fault})"
-                    print(f"state={state_name} fault={fault_name} torque={'on' if torque else 'off'} "
+                    # Byte 2 is head_state_torque_may_be_on(), a boolean -- NOT
+                    # the head_torque_state enum, which sits at offset 16 after
+                    # applied_sequence and control_hz. Decoding the boolean
+                    # through the enum names inverts the safety reading.
+                    payload = frame[1]
+                    torque_state = payload[16] if len(payload) > 16 else None
+                    torque_name = ("unreported" if torque_state is None else
+                                   TORQUE_NAMES[torque_state] if torque_state < len(TORQUE_NAMES)
+                                   else f"UNKNOWN({torque_state})")
+                    print(f"state={state_name} fault={fault_name} "
+                          f"torque_may_be_on={'yes' if torque else 'no'} "
+                          f"torque_state={torque_name} "
                           f"fan={'stalled' if fan_stalled else 'ok'} rpm={fan_rpm} "
                           f"uptime_s={uptime_ms / 1000:.3f}")
+                    if len(payload) >= 28:
+                        confirmations, requested = payload[17], payload[18]
+                        attempts, failures = struct.unpack_from("<II", payload, 20)
+                        print(f"shutdown requested={'yes' if requested else 'no'} "
+                              f"confirmations={confirmations} attempts={attempts} "
+                              f"failures={failures}")
+                    # Per-servo telemetry. These are the exact fields
+                    # active_feedback_fresh() gates home/enable on, so a
+                    # rejected motion command explains itself here.
+                    try:
+                        active_mask = decode_info(device.get(GET_INFO, INFO))["active_servo_mask"]
+                    except RuntimeError:
+                        active_mask = None
+                    for index in range(HEAD_SERVO_COUNT):
+                        offset = SERVO_BLOCK_OFFSET + index * SERVO_RECORD_LENGTH
+                        if len(payload) < offset + SERVO_RECORD_LENGTH:
+                            break
+                        if active_mask is not None and not (active_mask >> index) & 1:
+                            continue
+                        (goal, present, _velocity, current_ma, voltage_mv, temperature,
+                         _moving, hardware_error, online, age_ms) = struct.unpack_from(
+                            "<iiihHBBBBI", payload, offset)
+                        age = "never" if age_ms == 0xFFFFFFFF else f"{age_ms}ms"
+                        print(f"  servo {index:2d} (J{index // 5 + 1} id {index}): "
+                              f"online={'yes' if online else 'no'} "
+                              f"hw_error=0x{hardware_error:02x} feedback={age} "
+                              f"pos={present} goal={goal} {current_ma}mA "
+                              f"{voltage_mv / 1000:.1f}V {temperature}C")
                     return
             raise RuntimeError("no state frame")
+        if args.command == "diagnostics":
+            # Broadcast every 100 ms alongside STATE, so no request is needed.
+            raw = None
+            deadline_monotonic_s = time.monotonic() + 2.0
+            while raw is None and time.monotonic() < deadline_monotonic_s:
+                frame = device.recv(deadline_monotonic_s - time.monotonic())
+                if frame is not None and frame[0] == DIAGNOSTICS:
+                    raw = frame[1]
+            if raw is None:
+                raise RuntimeError("no diagnostics frame")
+            report = decode_diagnostics(raw)
+            print(f"read_retries={report['read_retries']}")
+            print(f"storage_state={report['storage_state']} "
+                  f"storage_result={report['storage_result']} "
+                  f"generation={report['generation']}")
+            # The register whose transfer was rejected last, with the raw
+            # Protocol 2.0 error byte: this names the control-table entry a
+            # discovery reason only categorizes.
+            print(f"last_error address={report['last_error_address']} "
+                  f"status=0x{report['last_error_status']:02x}")
+            # Branch health. telemetry_timeouts rising while a servo reports
+            # hw_error=0x00 is a delivery problem, not a servo problem.
+            for branch in report["branches"]:
+                if branch["expected_mask"] == 0 and branch["transmissions"] == 0:
+                    continue
+                print(f"  J{branch['index'] + 1}: expected=0x{branch['expected_mask']:02x} "
+                      f"received=0x{branch['received_mask']:02x} "
+                      f"timeouts={branch['timeouts']} "
+                      f"protocol_errors={branch['protocol_errors']} "
+                      f"bus_errors={branch['bus_errors']} "
+                      f"tx={branch['transmissions']}/{branch['transmission_errors']}err")
+            try:
+                active_mask = decode_info(device.get(GET_INFO, INFO))["active_servo_mask"]
+            except RuntimeError:
+                active_mask = None
+            print("discovery reasons:")
+            for index, reason in enumerate(report["discovery_reasons"]):
+                if active_mask is not None and not (active_mask >> index) & 1:
+                    continue
+                name = (DISCOVERY_REASON_NAMES[reason] if reason < len(DISCOVERY_REASON_NAMES)
+                        else f"UNKNOWN({reason})")
+                print(f"  servo {index:2d} (J{index // 5 + 1} id {index}): {name}")
+            if active_mask == 0:
+                print("  (no servo is active in the provisioned calibration)")
+            return
         if args.command == "probe":
             replies = probe_branch(device, args.branch, args.baud)
             connector = f"J{args.branch + 1}"
@@ -620,12 +758,22 @@ def main() -> None:
             if not device.request(STAGE_INFO, struct.pack("<I", token) + encode_info(profile))[0]:
                 raise RuntimeError("profile header rejected")
             active = int(profile["active_servo_mask"])
-            for slot_number, slot in enumerate(profile["joints"]):
+            for slot in profile["joints"]:
                 index = int(slot["index"])
-                if slot_number % 5 == 0 and not device.request(
-                        RENEW_LEASE, struct.pack("<I", token))[0]:
+                if not active & (1 << index):
+                    continue
+                # The lease lasts HEAD_LEASE_DURATION_MS (1000 ms) from each
+                # renewal and token_matches() rejects a staged slot the moment
+                # it lapses. Renewing every fifth *array position* let up to
+                # five staging round trips share one lease -- a 200 ms budget
+                # per request that any slower link blows partway through, so
+                # the upload failed on a middle slot with no hint that timing
+                # rather than slot content was the cause. Renew before each
+                # staged slot: one extra round trip per slot costs nothing
+                # next to a rejected upload.
+                if not device.request(RENEW_LEASE, struct.pack("<I", token))[0]:
                     raise RuntimeError("lease renewal failed during profile upload")
-                if active & (1 << index) and not device.request(STAGE_SLOT, struct.pack("<I", token) + encode_slot(slot))[0]:
+                if not device.request(STAGE_SLOT, struct.pack("<I", token) + encode_slot(slot))[0]:
                     raise RuntimeError(f"slot {index} rejected")
             if not device.request(RENEW_LEASE, struct.pack("<I", token))[0]:
                 raise RuntimeError("lease renewal failed before profile commit")
@@ -644,13 +792,29 @@ def main() -> None:
         message = {"home": HOME, "enable": ENABLE,
                    "proprioception": START_PROPRIOCEPTION,
                    "routing": START_ROUTING,
-                   "disable": DISABLE, "clear-fault": CLEAR_FAULT}[args.command]
+                   "disable": DISABLE, "clear-fault": CLEAR_FAULT,
+                   "release": RELEASE,
+                   "zero-home": ZERO_HOME}[args.command]
         if not device.request(message, struct.pack("<I", token))[0]:
             raise RuntimeError(f"{args.command} rejected")
         if args.command == "home":
             wait_for_home_ready(device, token)
             acquired_here = False
             print(f"homing completed; lease 0x{token:08x} will expire unless renewed")
+        elif args.command == "zero-home":
+            # Ends holding at the datum with torque on, so the lease has to be
+            # renewed for as long as the hold lasts.
+            wait_for_zero_home_hold(device, token)
+            print("holding at encoder zero; press Ctrl-C to disable")
+            try:
+                while True:
+                    if not device.request(RENEW_LEASE, struct.pack("<I", token))[0]:
+                        raise RuntimeError("lease renewal failed during zero-home hold")
+                    time.sleep(0.4)
+            except KeyboardInterrupt:
+                if not device.request(DISABLE, struct.pack("<I", token))[0]:
+                    raise RuntimeError("zero-home stop/disable was rejected")
+                print("zero-home hold stopped; torque-disable requested")
         elif args.command in ("proprioception", "routing"):
             label = ("proprioception hold" if args.command == "proprioception"
                      else "routing hold at 0 degrees")

@@ -20,6 +20,8 @@ int head_board_branch_set_baud(uint8_t branch_index, uint32_t baudrate)
 { ARG_UNUSED(branch_index); ARG_UNUSED(baudrate); return -ENOTSUP; }
 int head_board_branch_set_tx(uint8_t branch_index, bool tx)
 { ARG_UNUSED(branch_index); ARG_UNUSED(tx); return -ENOTSUP; }
+int head_board_branch_rx_restart(uint8_t branch_index)
+{ ARG_UNUSED(branch_index); return -ENOTSUP; }
 int head_board_release_all(void) { return 0; }
 uint32_t head_board_branch_error_flags(uint8_t branch_index)
 { ARG_UNUSED(branch_index); return 0u; }
@@ -136,6 +138,7 @@ struct branch_tx_state {
   uint8_t branch_index;
   atomic_t rx_enabled;
   atomic_t rx_disabled_count;
+  atomic_t rx_starvation_count;
   atomic_t rx_restart_failures;
   atomic_t rx_overflow_count;
 };
@@ -217,18 +220,31 @@ static void branch_uart_callback(const struct device *device,
     k_sem_give(&tx->rx_ready);
     break;
   }
-  case UART_RX_BUF_REQUEST:
+  case UART_RX_BUF_REQUEST: {
+    bool supplied = false;
     for (uint8_t index = 0u; index < 2u; ++index) {
       if (!atomic_test_and_set_bit(&tx->rx_buffers_used, index)) {
         if (uart_rx_buf_rsp(device, branch_rx_payload[tx->branch_index][index],
                             sizeof(branch_rx_payload[tx->branch_index][index])) != 0) {
           atomic_clear_bit(&tx->rx_buffers_used, index);
           atomic_or(&tx->rx_error_flags, BIT(30));
+        } else {
+          supplied = true;
         }
         break;
       }
     }
+    /* Both buffers already outstanding. The driver is left with nothing to
+     * fill, which silently starves the receiver, so record it rather than
+     * falling through without a trace. */
+    if (!supplied) {
+      atomic_inc(&tx->rx_starvation_count);
+      /* Surfaced through uart_error_flags so ping-debug reports it without a
+       * wire-protocol change: BIT(29) means "no DMA buffer was available". */
+      atomic_or(&tx->rx_error_flags, BIT(29));
+    }
     break;
+  }
   case UART_RX_BUF_RELEASED:
     for (uint8_t index = 0u; index < 2u; ++index) {
       if (event->data.rx_buf.buf == branch_rx_payload[tx->branch_index][index]) {
@@ -332,6 +348,33 @@ int head_board_branch_set_baud(uint8_t branch_index, uint32_t baudrate)
   if (result == 0) branch_baudrate[branch_index] = baudrate;
   const int rx_result = branch_rx_start(branch_index);
   return result != 0 ? result : rx_result;
+}
+
+/* Force the receiver back to a known state. head_board_branch_read_available()
+ * only restarts a branch whose rx_enabled has been cleared, which relies on
+ * UART_RX_DISABLED arriving. A receiver that has run out of DMA buffers stops
+ * consuming without ever reporting that event: it stays marked enabled, the
+ * hardware FIFO overruns, and no reply is delivered again. Nothing recovers
+ * the branch short of a reboot, so the telemetry timeout path calls this to
+ * break that wedge. */
+int head_board_branch_rx_restart(uint8_t branch_index)
+{
+  if (branch_index >= 4u || branch_uart[branch_index] == NULL) return -EINVAL;
+  struct branch_tx_state *tx = &branch_tx[branch_index];
+  if (atomic_get(&tx->active) != 0) return -EBUSY;
+  if (atomic_get(&tx->rx_enabled) != 0) {
+    k_sem_reset(&tx->rx_disabled);
+    /* A starved receiver may never answer, so do not fail on an unconfirmed
+     * disable; branch_rx_start() re-arms the buffer accounting regardless. */
+    if (uart_rx_disable(branch_uart[branch_index]) == 0) {
+      (void)k_sem_take(&tx->rx_disabled, K_MSEC(5));
+    }
+    atomic_clear(&tx->rx_enabled);
+  }
+  const k_spinlock_key_t key = k_spin_lock(&tx->rx_lock);
+  ring_buf_reset(&tx->rx_ring);
+  k_spin_unlock(&tx->rx_lock, key);
+  return branch_rx_start(branch_index);
 }
 
 int head_board_branch_set_tx(uint8_t branch_index, bool tx)

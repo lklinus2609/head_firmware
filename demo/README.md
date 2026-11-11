@@ -37,5 +37,75 @@ The originals stay in their run folders, where `record.json` and
 Not included: a sad face. None of the sad takes was accepted (the corners did
 not go down convincingly).
 
-Each take is played by `scripts/head-face` with `--camera realsense`; see
-`../host_ros/README.md`.
+## How to record the new-head takes again
+
+These are the commands that recorded videos 10-17 (run from `firmware/`;
+see `../host_ros/README.md` for every option). The takes used the knee
+neutrals of run `2026-11-10/191452_knee`, which are no longer valid: knee
+neutrals belong to one controller session and move when the lines slip. So
+first find new neutrals with the knee test (`--max-travel 650` keeps line 14
+inside its end mark, operator marks of 2026-11-11):
+
+```sh
+scripts/head-knee --limit 650 --camera realsense --down-clearance 800 --down-max-travel 2000 --max-travel 650
+```
+
+In the commands below, `<KNEE>` is the run folder that the knee test prints
+(for example `2026-11-11/125829_knee`).
+
+`10_natural-face` (run 205555):
+
+```sh
+scripts/head-natural --neutrals tuning_runs/runs/<KNEE>/neutrals.json --range up=350 --range diag=290 --range down=150 --seconds 40 --camera realsense
+```
+
+`11_full-action-space-explore` (run 210401):
+
+```sh
+scripts/head-natural --neutrals tuning_runs/runs/<KNEE>/neutrals.json --range up=350 --range diag=290 --range down=150 --explore --seconds 120 --seed 11 --camera realsense
+```
+
+`12_workspace-validation-40-poses` (run 211350):
+
+```sh
+scripts/head-natural --neutrals tuning_runs/runs/<KNEE>/neutrals.json --range up=350 --range diag=290 --range down=150 --validate 40 --seed 21 --camera realsense
+```
+
+`13_corners-down-while-talking` (run 204936):
+
+```sh
+scripts/head-natural --neutrals tuning_runs/runs/<KNEE>/neutrals.json --range up=350 --range diag=290 --range down=150 --jaw-open 3700 --smile -1 --jaw-release 8=38 --jaw-release 9=22 --seconds 30 --camera realsense
+```
+
+`14_fast-blinks` (run 204824):
+
+```sh
+scripts/head-natural --neutrals tuning_runs/runs/<KNEE>/neutrals.json --range up=350 --range diag=290 --range down=150 --no-talk --smile 0 --seconds 20 --lid-speed 5000 --lid-accel 80000 --lid-open-speed 3500 --camera realsense
+```
+
+`15_lid-ladder` (run 204310):
+
+```sh
+scripts/head-natural --neutrals tuning_runs/runs/<KNEE>/neutrals.json --range up=350 --range diag=290 --range down=150 --lid-ladder --lid-speed 2000 --camera realsense
+```
+
+`16_eyes-and-lids-tour` (run 185607; needs no knee neutrals, only the
+panel marks):
+
+```sh
+scripts/head-eyes --speed 2500 --camera realsense
+```
+
+`17_duchenne-smile-new-head` (run 193559):
+
+```sh
+scripts/head-face --neutrals tuning_runs/runs/<KNEE>/neutrals.json --demo duchenne --range up=350 --range diag=290 --range down=150 --line-speed 2500 --jaw-speed 2500 --camera realsense
+```
+
+Videos 01-09 were recorded on the old head; their commands do not apply to
+the new head.
+
+Not recorded yet: a talking take with speech (`head-natural --say`, built
+2026-11-11). On the head it stopped about 1.5 s into the speech three times
+(runs 124404, 125342, 130153, magnet-drop check on lines 14, 14, 19), and the
+right corner lines drift slacker between runs.

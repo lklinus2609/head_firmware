@@ -720,7 +720,8 @@ class FaceController:
                             for i in (*wg.PULL, *(self.guard.upper_neutral or ()))}
         lag = {i: servos[i].goal_tick - servos[i].present_tick
                for i in (*wg.PULL, *(self.guard.upper_neutral or ()))}
-        reason = self.checks.observe(watched_currents, drivers, pulled, lag) \
+        reason = self.checks.observe(watched_currents, drivers, pulled, lag, t_s=now,
+                                     jaw_tick=limited.get(wg.JAW)) \
             if new_sample else None
         targets = dict(self.hold)
         targets.update(limited)

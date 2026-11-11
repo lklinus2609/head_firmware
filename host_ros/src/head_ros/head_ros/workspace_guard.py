@@ -328,6 +328,18 @@ DROP_RELEASE_TICKS = 5
 # at 1000 ticks/s, then 23 mA once there, and the check stopped the run as a
 # "magnet losing grip". Chosen: 8 ticks (~25 mA of lag).
 DROP_SETTLED_LAG_TICKS = 8
+# After a driver's peak starts again (it was let go, another driver on its
+# side moved, or the jaw moved), the check waits this long before it takes a
+# new peak: the skin follows a release with a delay, so the load is still
+# high just after the release and then falls. Talking runs 124404, 125342
+# and 130153 (2026-11-11) stopped at the same speech moment on lines 14, 14
+# and 19 (82-97 mA -> 0-13 mA right after the line was let go 50-60 ticks
+# while the jaw opened and closed). Operator chose this window (0.3 s,
+# chosen) and the jaw-move reset, 2026-11-11. Only with observe(t_s=...).
+DROP_SETTLE_S = 0.3
+# The jaw moves load between the lines: a jaw target change of more than
+# this restarts every driver's peak (with t_s and jaw_tick given).
+DROP_JAW_MOVE_TICKS = 5
 
 
 class LiveChecks:
@@ -343,10 +355,15 @@ class LiveChecks:
         self._drops: Dict[int, int] = {}
         self._most_pulled: Dict[int, int] = {}
         self._others: Dict[int, Dict[int, int]] = {}
+        self._settle_until: Dict[int, float] = {}
+        self._jaw_ref: Optional[int] = None
 
     def observe(self, current_ma: Dict[int, int], drivers: Tuple[int, ...],
                 pulled: Optional[Dict[int, int]] = None,
-                lag_ticks: Optional[Dict[int, int]] = None) -> Optional[str]:
+                lag_ticks: Optional[Dict[int, int]] = None,
+                t_s: Optional[float] = None, jaw_tick: Optional[int] = None) -> Optional[str]:
+        """t_s (monotonic seconds) turns on the settle window (DROP_SETTLE_S);
+        jaw_tick (the jaw's target) also restarts the peaks when the jaw moves."""
         for index, current in current_ma.items():
             if index != JAW and abs(current) >= LINE_ABORT_MA:
                 return f"servo {index} at {current} mA (line abort {LINE_ABORT_MA} mA)"
@@ -354,10 +371,21 @@ class LiveChecks:
             if index not in drivers:                 # stopped driving: start over
                 self._peak.pop(index); self._drops.pop(index, None)
                 self._most_pulled.pop(index, None); self._others.pop(index, None)
+        jaw_moved = False
+        if t_s is not None and jaw_tick is not None:
+            if self._jaw_ref is None:
+                self._jaw_ref = jaw_tick
+            elif abs(jaw_tick - self._jaw_ref) > DROP_JAW_MOVE_TICKS:
+                jaw_moved = True
+                self._jaw_ref = jaw_tick
         for index in drivers:
             if index not in ALL_PULL:                # the jaw: JawGuard watches it
                 continue
             load = max(0, current_ma.get(index, 0) * ALL_PULL[index])
+            if jaw_moved:
+                self._peak[index] = load
+                self._drops[index] = 0
+                self._settle_until[index] = t_s + DROP_SETTLE_S
             if pulled is not None and index in pulled:
                 most = self._most_pulled.get(index, pulled[index])
                 if index in PULL:
@@ -374,10 +402,16 @@ class LiveChecks:
                     self._drops[index] = 0
                     most = pulled[index]
                     before = others
+                    if t_s is not None:
+                        self._settle_until[index] = t_s + DROP_SETTLE_S
                 self._most_pulled[index] = max(most, pulled[index])
                 self._others[index] = before
             if lag_ticks is not None and abs(lag_ticks.get(index, 0)) > DROP_SETTLED_LAG_TICKS:
                 continue                     # still moving: its current is mostly lag
+            if t_s is not None and t_s < self._settle_until.get(index, float("-inf")):
+                self._peak[index] = load     # settling: the peak starts after the window
+                self._drops[index] = 0
+                continue
             self._peak[index] = max(self._peak.get(index, 0), load)
             dropped = self._peak[index] >= DROP_MIN_PEAK_MA and load < DROP_FRACTION * self._peak[index]
             self._drops[index] = self._drops.get(index, 0) + 1 if dropped else 0

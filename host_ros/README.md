@@ -461,7 +461,11 @@ firmware/scripts/head-sweep --preview --limit 600 --sweep 0:1 --sweep 40:2
   may only lower it) and logs each servo's highest temperature in
   `record.json`. The magnet-drop check uses a driver's load only while it is
   within 8 ticks of its goal: the servos are P-only, so a fast move reads its
-  lag as load (run 200042: false "magnet" stop at 1000 ticks/s).
+  lag as load (run 200042: false "magnet" stop at 1000 ticks/s). Since
+  2026-11-11 it also waits 0.3 s (`DROP_SETTLE_S`) before it takes a new peak
+  after a line is let go, another line on its side moves or the jaw target
+  moves: the skin follows a release late, and talking runs 124404, 125342 and
+  130153 stopped on that (lines 14, 14, 19). Not yet run on the head.
   `--jaw-release down=N` pays the down lines out N ticks at the fully open
   jaw goal, in proportion to the jaw's measured position (the open-jaw
   neutral moves toward slack); see `firmware/docs/NATURAL_FACE_AND_JAW_WORKSPACE.md`.

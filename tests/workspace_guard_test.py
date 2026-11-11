@@ -122,6 +122,43 @@ def test_neutrals_follow_the_jaw() -> None:
         raise AssertionError("missing open-jaw neutrals were accepted")
 
 
+def test_drop_check_settle_window_and_jaw() -> None:
+    # Talking run 125342 (2026-11-11): line 14 let go 2045 -> 1987 while the
+    # skin follows late: load 82 just after the release, then 13. With t_s the
+    # peak waits DROP_SETTLE_S after the release: no stop.
+    checks = wg.LiveChecks()
+    t = 0.0
+    for load, pulled in ((60, 270), (85, 272), (82, 214), (70, 214), (40, 214), (13, 214),
+                         (13, 214), (13, 214)):
+        assert checks.observe({14: load}, (14,), {14: pulled}, {14: 0}, t_s=t) is None, (t, load)
+        t += 0.02
+    # Without t_s (old behaviour) the same samples stop the run.
+    checks = wg.LiveChecks()
+    reasons = [checks.observe({14: load}, (14,), {14: pulled}, {14: 0})
+               for load, pulled in ((60, 270), (85, 272), (82, 214), (70, 214), (40, 214), (13, 214),
+                                    (13, 214), (13, 214))]
+    assert any(r and "magnet" in r for r in reasons)
+    # A real drop while held still, after the window: still a stop.
+    checks = wg.LiveChecks()
+    t, reason = 0.0, None
+    for load in (90,) * 25 + (20,) * 4:
+        reason = checks.observe({14: load}, (14,), {14: 214}, {14: 0}, t_s=t)
+        t += 0.02
+    assert reason and "magnet" in reason
+    # The jaw moving restarts the peak (load moves between the lines).
+    checks = wg.LiveChecks()
+    t, jaw = 0.0, 4000
+    for k, load in enumerate((90,) * 20 + (85, 30, 20, 15, 15)):
+        if k == 20:
+            jaw = 3880
+        assert checks.observe({19: -load}, (19,), {19: 300}, {19: 0}, t_s=t, jaw_tick=jaw) is None, k
+        t += 0.02
+    # ... but once the jaw is still for the window, a fall is a stop again.
+    reasons = [checks.observe({19: -load}, (19,), {19: 300}, {19: 0}, t_s=t + 0.02 * k, jaw_tick=3880)
+               for k, load in enumerate((90,) * 20 + (20,) * 4)]
+    assert reasons[-1] and "magnet" in reasons[-1]
+
+
 def test_upper_face_commands_and_checks() -> None:
     upper = {10: 2944, 12: 1738, 16: 4017, 17: 2495}
     guard = wg.WorkspaceGuard(dict(NEUTRAL), upper_neutral=dict(upper),
@@ -145,6 +182,7 @@ def main() -> None:
     test_follower_and_live_checks()
     test_neutrals_follow_the_jaw()
     test_upper_face_commands_and_checks()
+    test_drop_check_settle_window_and_jaw()
     print("workspace guard: all tests passed")
 
 

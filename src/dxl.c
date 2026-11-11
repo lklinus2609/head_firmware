@@ -4,6 +4,7 @@
 #include <zephyr/kernel.h>
 
 #include "board.h"
+#include "config.h"
 #include "dxl.h"
 #include "state_machine.h"
 
@@ -14,8 +15,23 @@
  * Stage a complete branch response so a partial packet at the end of one DMA
  * drain can be combined safely with the next. */
 #define DXL_TELEMETRY_BRANCH_RX_CAPACITY 640u
+#ifndef __dtcm_noinit_section
+#define __dtcm_noinit_section /* host regression build: ordinary storage */
+#endif
+__dtcm_noinit_section struct head_dxl_trace head_dxl_trace;
+
+static void trace_point(enum head_dxl_trace_point point, uint8_t branch_index)
+{
+  head_dxl_trace.point = (uint32_t)point;
+  head_dxl_trace.branch_index = branch_index;
+  head_dxl_trace.point_ms = k_uptime_get_32();
+}
+
 static uint8_t telemetry_rx[HEAD_BRANCH_COUNT][DXL_TELEMETRY_BRANCH_RX_CAPACITY];
 static size_t telemetry_rx_used[HEAD_BRANCH_COUNT];
+static struct head_dxl_bus_stats bus_stats[HEAD_BRANCH_COUNT];
+static uint32_t telemetry_window_byte_count[HEAD_BRANCH_COUNT];
+static uint32_t missed_reply_count[HEAD_SERVO_COUNT];
 static uint32_t hardware_alert_servo_mask;
 static uint8_t discovery_reason[HEAD_SERVO_COUNT];
 /* Commissioning must be able to talk to a servo that is reporting a Hardware
@@ -28,6 +44,7 @@ static bool alert_tolerant_configuration;
  * so the underlying loss rate stays visible instead of being hidden. */
 static uint8_t read_retry_attempts;
 static uint16_t read_retry_count;
+static uint8_t last_preparation_failure;
 /* Last Goal Position actually put on the wire, so a profile-driven move is not
  * restarted by a redundant rewrite. Only consulted while zero homing. */
 static int32_t transmitted_goal_tick[HEAD_SERVO_COUNT];
@@ -65,6 +82,11 @@ uint32_t head_dxl_take_hardware_alert_mask(void)
 
 #define DXL_TELEMETRY_START_ADDRESS 70u
 #define DXL_TELEMETRY_LENGTH 77u
+/* Status Packet LEN of a telemetry reply: instruction, error, data, CRC. Byte
+ * stuffing adds at most one byte per three of instruction, error and data. */
+#define DXL_TELEMETRY_STATUS_LENGTH (DXL_TELEMETRY_LENGTH + 4u)
+#define DXL_TELEMETRY_STATUS_LENGTH_MAX \
+  (DXL_TELEMETRY_STATUS_LENGTH + (DXL_TELEMETRY_LENGTH + 2u) / 3u)
 #define DXL_XC330_T181_MODEL_NUMBER 1210u
 #define DXL_OPERATING_MODE_CURRENT_POSITION 5u
 #define DXL_BAUD_1M 3u
@@ -145,6 +167,21 @@ static int servo_index_for_id(const struct head_calibration *calibration,
     }
   }
   return -1;
+}
+
+/* Bit position of an active servo within its branch's telemetry masks: its
+ * rank among that branch's active servos, as head_config_branch_servo_indexes()
+ * orders them. */
+static uint8_t branch_member_bit(const struct head_calibration *calibration,
+                                 uint8_t branch_index, uint8_t servo_index)
+{
+  uint8_t servo_indexes[HEAD_SERVOS_PER_BRANCH];
+  const uint8_t servo_count =
+      head_config_branch_servo_indexes(calibration, branch_index, servo_indexes);
+  for (uint8_t member = 0u; member < servo_count; ++member) {
+    if (servo_indexes[member] == servo_index) return (uint8_t)(1u << member);
+  }
+  return 0u;
 }
 
 static uint16_t dxl_crc16(const uint8_t *data, size_t length)
@@ -273,12 +310,12 @@ static size_t dxl_sync_read(uint8_t branch_index, const struct head_calibration 
   output[byte_offset++] = DXL_TELEMETRY_START_ADDRESS >> 8u;
   output[byte_offset++] = DXL_TELEMETRY_LENGTH & 0xFFu;
   output[byte_offset++] = DXL_TELEMETRY_LENGTH >> 8u;
-  for (uint8_t offset = 0; offset < HEAD_SERVOS_PER_BRANCH; ++offset) {
-    const uint8_t index = branch_index * HEAD_SERVOS_PER_BRANCH + offset;
-    if (servo_active(calibration, index)) {
-      output[byte_offset++] = calibration->joints[index].servo_id;
-      ++member_count;
-    }
+  uint8_t servo_indexes[HEAD_SERVOS_PER_BRANCH];
+  const uint8_t servo_count =
+      head_config_branch_servo_indexes(calibration, branch_index, servo_indexes);
+  for (uint8_t member = 0u; member < servo_count; ++member) {
+    output[byte_offset++] = calibration->joints[servo_indexes[member]].servo_id;
+    ++member_count;
   }
   if (member_count == 0u) return 0u;
   const uint16_t packet_length = 3u + 4u + member_count;
@@ -299,10 +336,11 @@ static size_t dxl_sync_write_torque(uint8_t branch_index,
   output[byte_offset++] = 0x83u;             /* Sync Write */
   output[byte_offset++] = 64u; output[byte_offset++] = 0u; /* Torque Enable */
   output[byte_offset++] = 1u; output[byte_offset++] = 0u;
-  for (uint8_t offset = 0; offset < HEAD_SERVOS_PER_BRANCH; ++offset) {
-    const uint8_t index = branch_index * HEAD_SERVOS_PER_BRANCH + offset;
-    if (!servo_active(calibration, index)) continue;
-    output[byte_offset++] = calibration->joints[index].servo_id;
+  uint8_t servo_indexes[HEAD_SERVOS_PER_BRANCH];
+  const uint8_t servo_count =
+      head_config_branch_servo_indexes(calibration, branch_index, servo_indexes);
+  for (uint8_t member = 0u; member < servo_count; ++member) {
+    output[byte_offset++] = calibration->joints[servo_indexes[member]].servo_id;
     output[byte_offset++] = enabled ? 1u : 0u;
     ++member_count;
   }
@@ -405,9 +443,11 @@ size_t head_dxl_build_sync_write(uint8_t branch_index, const struct head_runtime
   output[byte_offset++] = 0x83u;             /* Sync Write */
   output[byte_offset++] = 116u; output[byte_offset++] = 0u; /* Goal Position */
   output[byte_offset++] = 4u; output[byte_offset++] = 0u;
-  for (uint8_t offset = 0; offset < HEAD_SERVOS_PER_BRANCH; ++offset) {
-    const uint8_t index = branch_index * HEAD_SERVOS_PER_BRANCH + offset;
-    if (!servo_active(calibration, index)) continue;
+  uint8_t servo_indexes[HEAD_SERVOS_PER_BRANCH];
+  const uint8_t servo_count =
+      head_config_branch_servo_indexes(calibration, branch_index, servo_indexes);
+  for (uint8_t member = 0u; member < servo_count; ++member) {
+    const uint8_t index = servo_indexes[member];
     const int32_t target = runtime->servos[index].goal_tick;
     output[byte_offset++] = calibration->joints[index].servo_id;
     const uint32_t target_bits = (uint32_t)target;
@@ -497,8 +537,10 @@ int head_dxl_write_targets(struct head_runtime *runtime,
      * 5.1 ms, so a single servo usually slipped through and a full branch
      * usually did not. */
     for (uint8_t servo_index = 0u; servo_index < HEAD_SERVO_COUNT; ++servo_index) {
-      const uint8_t branch_index = servo_index / HEAD_SERVOS_PER_BRANCH;
-      if ((written & (uint8_t)(1u << branch_index)) == 0u) continue;
+      if (!servo_active(calibration, servo_index)) continue;
+      const uint8_t branch_index = calibration->joints[servo_index].branch_index;
+      if (branch_index >= HEAD_BRANCH_COUNT ||
+          (written & (uint8_t)(1u << branch_index)) == 0u) continue;
       transmitted_goal_tick[servo_index] = runtime->servos[servo_index].goal_tick;
     }
     transmitted_goal_valid = true;
@@ -508,20 +550,43 @@ int head_dxl_write_targets(struct head_runtime *runtime,
   return result;
 }
 
+/* Bytes a status read may skip before its header; a late reply or a glitch at
+ * the direction switch leaves a few. */
+#define DXL_STATUS_HEADER_SEARCH_LIMIT 32u
+
+/* Send a request that expects a reply. The receiver restarts first, so the
+ * reply lands in a fresh, empty DMA buffer and the driver never chains to the
+ * next buffer while it arrives: that hand-over lost and damaged replies
+ * (docs/reviews/FIRMWARE_AUDIT_2026-10-05.md section 8). */
+static int dxl_send_request(uint8_t branch_index, const uint8_t *request, size_t length)
+{
+  if (head_board_branch_rx_restart(branch_index) != 0) {
+    ++bus_stats[branch_index].rx_restart_failure_count;
+  }
+  return head_board_branch_write(branch_index, request, length);
+}
+
 static int dxl_read_status(uint8_t branch_index, uint8_t *response, size_t capacity,
                            uint32_t timeout_us, size_t *response_length)
 {
   uint16_t packet_length;
   const size_t header_length = 7u;
   size_t total;
+  size_t skipped = 0u;
 
   if (capacity < 11u || response_length == NULL ||
-      head_board_branch_read(branch_index, response, header_length, timeout_us) != 0) {
+      head_board_branch_read(branch_index, response, 4u, timeout_us) != 0) {
     return -EIO;
   }
-  if (response[0] != 0xFFu || response[1] != 0xFFu || response[2] != 0xFDu ||
-      response[3] != 0u) {
-    return -EPROTO;
+  /* Search for the header, as the Protocol 2.0 specification says to. */
+  while (response[0] != 0xFFu || response[1] != 0xFFu || response[2] != 0xFDu ||
+         response[3] != 0u) {
+    if (++skipped > DXL_STATUS_HEADER_SEARCH_LIMIT) return -EPROTO;
+    memmove(response, &response[1], 3u);
+    if (head_board_branch_read(branch_index, &response[3], 1u, timeout_us) != 0) return -EIO;
+  }
+  if (head_board_branch_read(branch_index, &response[4], header_length - 4u, timeout_us) != 0) {
+    return -EIO;
   }
   packet_length = (uint16_t)response[5] | ((uint16_t)response[6] << 8u);
   total = header_length + packet_length;
@@ -545,7 +610,7 @@ static int dxl_read_register_once(uint8_t branch_index, uint8_t servo_id, uint16
   if (request_length == 0u || data == NULL || length + 1u > sizeof(parameters)) return -EINVAL;
   while (head_board_branch_read_available(branch_index, discarded, sizeof(discarded)) != 0u) {
   }
-  if (head_board_branch_write(branch_index, request, request_length) != 0 ||
+  if (dxl_send_request(branch_index, request, request_length) != 0 ||
       dxl_read_status(branch_index, response, sizeof(response), 3000u, &response_length) != 0 ||
       !dxl_status_valid(response, response_length, servo_id)) return -EIO;
   const size_t parameter_length = dxl_unstuff_status_parameters(
@@ -577,7 +642,7 @@ static int dxl_write_register_u8(uint8_t branch_index, uint8_t servo_id, uint16_
   const size_t request_length = dxl_write(servo_id, address, &value, sizeof(value),
                                            request, sizeof(request));
   if (request_length == 0u ||
-      head_board_branch_write(branch_index, request, request_length) != 0 ||
+      dxl_send_request(branch_index, request, request_length) != 0 ||
       dxl_read_status(branch_index, response, sizeof(response), 3000u, &response_length) != 0 ||
       !dxl_status_valid(response, response_length, servo_id)) return -EIO;
   const size_t parameter_length = dxl_unstuff_status_parameters(
@@ -601,7 +666,7 @@ static int dxl_write_register_bytes(uint8_t branch_index, uint8_t servo_id, uint
   const size_t request_length = dxl_write(servo_id, address, data, length,
                                            request, sizeof(request));
   if (request_length == 0u ||
-      head_board_branch_write(branch_index, request, request_length) != 0 ||
+      dxl_send_request(branch_index, request, request_length) != 0 ||
       dxl_read_status(branch_index, response, sizeof(response), 3000u, &response_length) != 0 ||
       !dxl_status_valid(response, response_length, servo_id)) return -EIO;
   const size_t parameter_length = dxl_unstuff_status_parameters(
@@ -736,7 +801,13 @@ static int prepare_step_once(struct head_runtime *runtime,
      * overcoming the gearbox, which makes the servo stick, break free and
      * overshoot rather than track the ramp. */
     const bool collision_limited = homing && !runtime->zero_homing;
-    const uint16_t current_ma = (uint16_t)(collision_limited ?
+    /* Tuning caps every servo, the held ones included, at the operator's
+     * limit or its own operating_current_ma, whichever is lower: that is what
+     * bounds tendon tension while ends are being found. */
+    const bool tuning = runtime->preparation_target_state == HEAD_TUNING;
+    const uint16_t current_ma = tuning ?
+        head_state_tuning_limit_ma(runtime, calibration, servo_index) :
+        (uint16_t)(collision_limited ?
         joint->homing_current_limit_ma : joint->operating_current_ma);
     expected[0] = (uint8_t)current_ma; expected[1] = (uint8_t)(current_ma >> 8u);
     break;
@@ -791,6 +862,24 @@ static int prepare_step_once(struct head_runtime *runtime,
  *
  * -ERANGE and -EINVAL are never retried: an out-of-range voltage or position
  * is the servo answering correctly with an answer that forbids motion. */
+/* Remember which step failed for good: (phase << 5) | servo index, servo 31
+ * when no servo was addressed (phase 0). The servo of a failed step is the
+ * one before the advanced cursor. */
+static void note_preparation_failure(const struct head_runtime *runtime)
+{
+  const uint8_t phase = runtime->preparation_phase;
+  const uint8_t next = runtime->preparation_servo_index;
+  const bool homing = runtime->preparation_target_state == HEAD_HOMING ||
+                      runtime->preparation_target_state == HEAD_MAINTENANCE_CALIBRATION;
+  uint8_t servo = (phase == 0u || next == 0u || next > HEAD_SERVO_COUNT) ?
+      31u : (uint8_t)(next - 1u);
+  /* Homing prepares only the selected servo from phase 3 on. */
+  if (homing && phase > 2u && runtime->homing_index < HEAD_SERVO_COUNT) {
+    servo = runtime->homing_index;
+  }
+  last_preparation_failure = (uint8_t)(((phase & 0x7u) << 5u) | (servo & 0x1Fu));
+}
+
 int head_dxl_prepare_step(struct head_runtime *runtime,
                           const struct head_calibration *calibration)
 {
@@ -801,18 +890,16 @@ int head_dxl_prepare_step(struct head_runtime *runtime,
     runtime->preparation_attempts = 0u;
     return result;
   }
-  if (result == -ERANGE || result == -EINVAL) return result;
-  if (runtime->preparation_attempts >= HEAD_PREPARATION_STEP_RETRIES) return result;
-  /* Recover the receivers before retrying. A starved RX never reports
-   * RX_DISABLED, so it stays silent until something re-arms it -- and the
-   * telemetry timeout that normally does so is suppressed for the whole of
-   * preparation. Without this every retry would question the same dead
-   * receiver and the budget would drain for certain, which is exactly the
-   * burst of consecutive losses seen here. The branches are idle apart from
-   * this transfer, so re-arming all of them costs nothing. */
-  for (uint8_t branch_index = 0u; branch_index < HEAD_BRANCH_COUNT; ++branch_index) {
-    (void)head_board_branch_rx_restart(branch_index);
+  if (result == -ERANGE || result == -EINVAL) {
+    note_preparation_failure(runtime);
+    return result;
   }
+  if (runtime->preparation_attempts >= HEAD_PREPARATION_STEP_RETRIES) {
+    note_preparation_failure(runtime);
+    return result;
+  }
+  /* No receiver recovery is needed here: dxl_send_request() restarts the
+   * receiver before every request, including the retry. */
   ++runtime->preparation_attempts;
   if (read_retry_count < UINT16_MAX) ++read_retry_count;
   runtime->preparation_servo_index = cursor;
@@ -822,6 +909,11 @@ int head_dxl_prepare_step(struct head_runtime *runtime,
 uint16_t head_dxl_read_retry_count(void)
 {
   return read_retry_count;
+}
+
+uint8_t head_dxl_last_preparation_failure(void)
+{
+  return last_preparation_failure;
 }
 
 /* Status Return Level 1 deliberately produces no Write response.  This helper
@@ -835,7 +927,7 @@ static int dxl_write_register_u8_without_status(uint8_t branch_index, uint8_t se
   const size_t request_length = dxl_write(servo_id, address, &value, sizeof(value),
                                            request, sizeof(request));
   if (request_length == 0u ||
-      head_board_branch_write(branch_index, request, request_length) != 0) return -EIO;
+      dxl_send_request(branch_index, request, request_length) != 0) return -EIO;
   /* The maximum documented Return Delay is 508 us.  Wait past it and discard
    * an unexpected ACK before issuing the readback request. */
   k_busy_wait(750u);
@@ -875,7 +967,7 @@ int head_dxl_debug_ping(uint8_t branch_index, uint8_t servo_id,
     stale += dropped;
   }
   diagnostic->stale_bytes = stale > UINT16_MAX ? UINT16_MAX : (uint16_t)stale;
-  if (head_board_branch_write(branch_index, diagnostic->request,
+  if (dxl_send_request(branch_index, diagnostic->request,
                               diagnostic->request_length) != 0) return -EIO;
 
   const uint32_t started = k_cycle_get_32();
@@ -957,7 +1049,7 @@ int head_dxl_probe_branch(uint8_t branch_index, struct head_dxl_probe_reply *rep
     const size_t size = dxl_ping(servo_id, request, sizeof(request));
 
     (void)head_board_branch_read_available(branch_index, discarded, sizeof(discarded));
-    if (size == 0u || head_board_branch_write(branch_index, request, size) != 0) {
+    if (size == 0u || dxl_send_request(branch_index, request, size) != 0) {
       return -EIO;
     }
     if (dxl_read_status(branch_index, response, sizeof(response), 2500u,
@@ -1013,7 +1105,7 @@ int head_dxl_discover(struct head_runtime *runtime,
                                               sizeof(response)) != 0u) {
       }
       if (size != 0u &&
-          head_board_branch_write(joint->branch_index, request, size) == 0 &&
+          dxl_send_request(joint->branch_index, request, size) == 0 &&
           dxl_read_status(joint->branch_index, response, sizeof(response), 2500u,
                           &response_length) == 0 &&
           response_length >= 14u &&
@@ -1224,6 +1316,17 @@ static void telemetry_consume(struct head_runtime *runtime,
   size_t *used = &telemetry_rx_used[branch_index];
   struct head_branch_health *health = &runtime->branches[branch_index];
   size_t count;
+  /* The buffered count can never legitimately exceed the buffer. If it does,
+   * every bound below breaks (the capacity check underflows and the resync
+   * loop walks memory), so drop the buffer, count it, and keep the evidence. */
+  if (*used > sizeof(telemetry_rx[branch_index])) {
+    ++head_dxl_trace.bad_used_count;
+    head_dxl_trace.bad_used_value = (uint32_t)*used;
+    *used = 0u;
+    ++health->protocol_errors;
+  }
+  head_dxl_trace.consume_used = (uint32_t)*used;
+  head_dxl_trace.consume_loops = 0u;
   do {
     count = head_board_branch_read_available(branch_index, incoming, sizeof(incoming));
     if (count > sizeof(telemetry_rx[branch_index]) - *used) {
@@ -1232,20 +1335,33 @@ static void telemetry_consume(struct head_runtime *runtime,
     }
     memcpy(&telemetry_rx[branch_index][*used], incoming, count);
     *used += count;
+    bus_stats[branch_index].received_byte_count += (uint32_t)count;
+    telemetry_window_byte_count[branch_index] += (uint32_t)count;
   } while (count == sizeof(incoming));
   while (*used >= 7u) {
     uint16_t length;
     size_t total;
+    ++head_dxl_trace.consume_loops;
     if (telemetry_rx[branch_index][0] != 0xFFu || telemetry_rx[branch_index][1] != 0xFFu ||
         telemetry_rx[branch_index][2] != 0xFDu || telemetry_rx[branch_index][3] != 0u) {
-      memmove(telemetry_rx[branch_index], &telemetry_rx[branch_index][1], --*used);
+      /* Resynchronize in one move to the next possible header start, rather
+       * than one byte per pass: noise on a branch otherwise costs one full
+       * buffer shift per byte. */
+      size_t next = 1u;
+      while (next < *used && telemetry_rx[branch_index][next] != 0xFFu) ++next;
+      bus_stats[branch_index].resync_byte_count += (uint32_t)next;
+      *used -= next;
+      memmove(telemetry_rx[branch_index], &telemetry_rx[branch_index][next], *used);
       continue;
     }
     length = (uint16_t)telemetry_rx[branch_index][5] | ((uint16_t)telemetry_rx[branch_index][6] << 8u);
     total = 7u + length;
-    if (length < 4u || total > sizeof(telemetry_rx[branch_index])) {
+    /* Every reply here is the same Status Packet, so a LEN outside its range
+     * is damage: drop one byte and search again rather than trust it. */
+    if (length < DXL_TELEMETRY_STATUS_LENGTH || length > DXL_TELEMETRY_STATUS_LENGTH_MAX) {
       memmove(telemetry_rx[branch_index], &telemetry_rx[branch_index][1], --*used);
       ++health->protocol_errors;
+      ++bus_stats[branch_index].bad_length_count;
       continue;
     }
     if (*used < total) break;
@@ -1255,8 +1371,32 @@ static void telemetry_consume(struct head_runtime *runtime,
     const size_t parameter_length = dxl_unstuff_status_parameters(telemetry_rx[branch_index],
                                                                      total, parameters,
                                                                      sizeof(parameters));
-    if (servo_index >= 0 && dxl_status_valid(telemetry_rx[branch_index], total, servo_id) &&
-        parameter_length == 78u && (parameters[0] & 0x7fu) == 0u) {
+    const bool packet_valid = dxl_status_valid(telemetry_rx[branch_index], total, servo_id) &&
+                              parameter_length == 78u;
+    if (!packet_valid) {
+      ++bus_stats[branch_index].bad_packet_count;
+      /* In place: the next header starts right where this packet ends, so
+       * its bytes were changed, not lost or added. Shifted: bytes were lost
+       * or added. Skipping the whole claimed packet would also discard the
+       * start of the next member's reply, so drop one byte and search. */
+      if (*used >= total + 4u) {
+        const uint8_t *next = &telemetry_rx[branch_index][total];
+        if (next[0] == 0xFFu && next[1] == 0xFFu && next[2] == 0xFDu && next[3] == 0u) {
+          ++bus_stats[branch_index].bad_in_place_count;
+        } else {
+          ++bus_stats[branch_index].bad_shifted_count;
+        }
+      }
+      ++health->protocol_errors;
+      memmove(telemetry_rx[branch_index], &telemetry_rx[branch_index][1], --*used);
+      continue;
+    }
+    if (servo_index < 0) {
+      ++bus_stats[branch_index].unknown_id_count;
+    } else if ((parameters[0] & 0x7fu) != 0u) {
+      ++bus_stats[branch_index].servo_error_count;
+    }
+    if (servo_index >= 0 && (parameters[0] & 0x7fu) == 0u) {
       const uint8_t index = (uint8_t)servo_index;
       struct head_servo_state *state = &runtime->servos[index];
       state->online = true;
@@ -1265,6 +1405,10 @@ static void telemetry_consume(struct head_runtime *runtime,
       if ((parameters[0] & 0x80u) != 0u) head_state_fault(runtime, HEAD_FAULT_SERVO);
       state->hardware_error = parameters[1];              /* address 70 */
       state->moving_status = parameters[54];              /* address 123 */
+      /* The datasheet gives no range for Present PWM(124). It is read as
+       * signed, like Goal PWM(100), which spans -PWM Limit(36) ~ PWM Limit(36). */
+      state->present_pwm_raw = (int16_t)((uint16_t)parameters[55] |
+          ((uint16_t)parameters[56] << 8u));               /* address 124 */
       state->present_current_ma = (int16_t)((uint16_t)parameters[57] |
           ((uint16_t)parameters[58] << 8u));
       state->present_velocity_raw = (int32_t)((uint32_t)parameters[59] |
@@ -1281,7 +1425,7 @@ static void telemetry_consume(struct head_runtime *runtime,
       state->temperature_c = parameters[77];              /* address 146 */
       state->last_feedback_ms = now_ms;
       state->last_current_feedback_ms = now_ms;
-      health->telemetry_received_mask |= (uint8_t)(1u << (index % HEAD_SERVOS_PER_BRANCH));
+      health->telemetry_received_mask |= branch_member_bit(calibration, branch_index, index);
     } else {
       ++health->protocol_errors;
     }
@@ -1299,45 +1443,83 @@ void head_dxl_telemetry_tick(struct head_runtime *runtime,
     struct head_branch_health *health = &runtime->branches[branch_index];
     if (head_board_branch_error_flags(branch_index) != 0u) ++health->bus_errors;
     if (health->telemetry_active) {
+      trace_point(HEAD_DXL_TRACE_CONSUME, branch_index);
       telemetry_consume(runtime, calibration, branch_index, now_ms);
       if (health->telemetry_received_mask == health->telemetry_expected_mask) {
         health->telemetry_active = false;
         health->telemetry_completed_ms = now_ms;
+        ++bus_stats[branch_index].complete_count;
       } else if (now_ms - health->telemetry_requested_ms >= HEAD_TELEMETRY_RESPONSE_TIMEOUT_MS) {
         const uint8_t missing = health->telemetry_expected_mask &
                                 (uint8_t)~health->telemetry_received_mask;
-        for (uint8_t offset = 0u; offset < HEAD_SERVOS_PER_BRANCH; ++offset) {
-          if ((missing & (1u << offset)) != 0u) {
-            runtime->servos[branch_index * HEAD_SERVOS_PER_BRANCH + offset].online = false;
+        uint8_t servo_indexes[HEAD_SERVOS_PER_BRANCH];
+        const uint8_t servo_count =
+            head_config_branch_servo_indexes(calibration, branch_index, servo_indexes);
+        for (uint8_t member = 0u; member < servo_count; ++member) {
+          if ((missing & (1u << member)) != 0u) {
+            runtime->servos[servo_indexes[member]].online = false;
+            ++missed_reply_count[servo_indexes[member]];
           }
         }
         ++health->telemetry_timeouts;
+        if (telemetry_window_byte_count[branch_index] == 0u) {
+          ++bus_stats[branch_index].silent_timeout_count;
+        } else {
+          ++bus_stats[branch_index].partial_timeout_count;
+        }
         health->telemetry_active = false;
         /* A branch whose receiver has starved never reports RX_DISABLED, so
          * head_board_branch_read_available() never re-arms it and every later
          * poll times out identically until reboot. Recover it here: the reply
          * for this cycle is already lost, and a healthy branch that simply
          * missed one reply is re-armed harmlessly. */
-        if (head_board_branch_rx_restart(branch_index) != 0) ++health->bus_errors;
+        if (head_board_branch_rx_restart(branch_index) != 0) {
+          ++health->bus_errors;
+          ++bus_stats[branch_index].rx_restart_failure_count;
+        }
       }
       continue;
     }
     if (!start_new) continue;
     if (now_ms - health->telemetry_requested_ms < HEAD_TELEMETRY_PERIOD_MS) continue;
+    trace_point(HEAD_DXL_TRACE_BUILD, branch_index);
     const size_t size = dxl_sync_read(branch_index, calibration, request, sizeof(request));
     if (size == 0u) continue;
-    health->telemetry_expected_mask = (uint8_t)((calibration->active_servo_mask >>
-                                      (branch_index * HEAD_SERVOS_PER_BRANCH)) & 0x1Fu);
+    uint8_t servo_indexes[HEAD_SERVOS_PER_BRANCH];
+    health->telemetry_expected_mask = (uint8_t)((1u << head_config_branch_servo_indexes(
+        calibration, branch_index, servo_indexes)) - 1u);
     health->telemetry_received_mask = 0u;
     telemetry_rx_used[branch_index] = 0u;
+    telemetry_window_byte_count[branch_index] = 0u;
     uint8_t discarded[128];
-    while (head_board_branch_read_available(branch_index, discarded, sizeof(discarded)) != 0u) {
+    size_t discarded_count;
+    trace_point(HEAD_DXL_TRACE_DRAIN, branch_index);
+    head_dxl_trace.drain_count = 0u;
+    while ((discarded_count = head_board_branch_read_available(branch_index, discarded,
+                                                               sizeof(discarded))) != 0u) {
+      ++head_dxl_trace.drain_count;
+      bus_stats[branch_index].drained_byte_count += (uint32_t)discarded_count;
     }
     health->telemetry_requested_ms = now_ms;
-    if (head_board_branch_write(branch_index, request, size) != 0) {
+    trace_point(HEAD_DXL_TRACE_WRITE, branch_index);
+    if (dxl_send_request(branch_index, request, size) != 0) {
       ++health->bus_errors;
+      ++bus_stats[branch_index].write_failure_count;
       continue;
     }
+    ++bus_stats[branch_index].request_count;
     health->telemetry_active = true;
+    trace_point(HEAD_DXL_TRACE_DONE, branch_index);
   }
+}
+
+void head_dxl_bus_stats(uint8_t branch_index, struct head_dxl_bus_stats *stats)
+{
+  if (branch_index >= HEAD_BRANCH_COUNT || stats == NULL) return;
+  *stats = bus_stats[branch_index];
+}
+
+uint32_t head_dxl_missed_reply_count(uint8_t servo_index)
+{
+  return servo_index < HEAD_SERVO_COUNT ? missed_reply_count[servo_index] : 0u;
 }

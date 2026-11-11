@@ -1,0 +1,107 @@
+diff --git a/drivers/dma/dma_mcux_edma.c b/drivers/dma/dma_mcux_edma.c
+index 26c7cf58c34..02f3005149b 100644
+--- a/drivers/dma/dma_mcux_edma.c
++++ b/drivers/dma/dma_mcux_edma.c
+@@ -215,20 +215,40 @@ static void dma_mcux_edma_irq_handler(const struct device *dev, uint32_t channel
+ }
+ 
+ #if !DT_INST_PROP(0, no_error_irq)
++/* Errors per hardware channel since boot, and the ES register at the last
++ * one. Not part of the Zephyr DMA API: read by the head firmware's bus
++ * statistics (firmware/patches/). */
++uint32_t dma_mcux_edma_channel_error_count[32];
++uint32_t dma_mcux_edma_channel_last_error_status[32];
++
+ static void dma_mcux_edma_error_irq_handler(const struct device *dev)
+ {
+ 	int i = 0;
+ 	uint32_t flag = 0;
+ 	uint32_t hw_channel;
++	const uint32_t error_status = DEV_BASE(dev)->ES;
++	const uint32_t error_channels = DEV_BASE(dev)->ERR;
+ 
++	for (i = 0; i < 32; i++) {
++		if ((error_channels >> i) & 1U) {
++			dma_mcux_edma_channel_error_count[i]++;
++			dma_mcux_edma_channel_last_error_status[i] = error_status;
++		}
++	}
+ 	for (i = 0; i < DEV_CFG(dev)->dma_channels; i++) {
++		hw_channel = dma_mcux_edma_add_channel_gap(dev, i);
+ 		if (DEV_CHANNEL_DATA(dev, i)->busy) {
+-			hw_channel = dma_mcux_edma_add_channel_gap(dev, i);
+ 			flag = EDMA_GetChannelStatusFlags(DEV_BASE(dev), hw_channel);
+ 			EDMA_ClearChannelStatusFlags(DEV_BASE(dev), hw_channel, 0xFFFFFFFF);
+ 			EDMA_AbortTransfer(DEV_EDMA_HANDLE(dev, i));
+ 			DEV_CHANNEL_DATA(dev, i)->busy = false;
+ 			LOG_INF("channel %d error status is 0x%x", hw_channel, flag);
++		} else if ((EDMA_GetChannelStatusFlags(DEV_BASE(dev), hw_channel) &
++			    kEDMA_ErrorFlag) != 0U) {
++			/* Never cleared before, so this interrupt fired again at once,
++			 * without end, and starved every thread. */
++			EDMA_ClearChannelStatusFlags(DEV_BASE(dev), hw_channel, kEDMA_ErrorFlag);
++			LOG_INF("idle channel %d error cleared", hw_channel);
+ 		}
+ 	}
+ 
+diff --git a/drivers/serial/uart_mcux_lpuart.c b/drivers/serial/uart_mcux_lpuart.c
+index 7b8d96252b3..8e1217656d7 100644
+--- a/drivers/serial/uart_mcux_lpuart.c
++++ b/drivers/serial/uart_mcux_lpuart.c
+@@ -507,6 +507,10 @@ static void mcux_lpuart_async_rx_flush(const struct device *dev)
+ 	struct mcux_lpuart_data *data = dev->data;
+ 	const struct mcux_lpuart_config *config = dev->config;
+ 
++	/* Backport of upstream d73e311f4a: dma_callback() (DMA ISR) also updates
++	 * rx_dma_params. Read the DMA position and report it in one step, so the
++	 * ISR cannot switch buffers in between and reorder or misplace data. */
++	const unsigned int key = irq_lock();
+ 	const int get_status_result = dma_get_status(config->rx_dma_config.dma_dev,
+ 						     config->rx_dma_config.dma_channel,
+ 						     &status);
+@@ -522,6 +526,7 @@ static void mcux_lpuart_async_rx_flush(const struct device *dev)
+ 	} else {
+ 		LOG_ERR("Error getting DMA status");
+ 	}
++	irq_unlock(key);
+ }
+ 
+ static int mcux_lpuart_rx_disable(const struct device *dev)
+@@ -534,7 +539,8 @@ static int mcux_lpuart_rx_disable(const struct device *dev)
+ 
+ 	LPUART_EnableRx(lpuart, false);
+ 	(void)k_work_cancel_delayable(&data->async.rx_dma_params.timeout_work);
+-	LPUART_DisableInterrupts(lpuart, kLPUART_IdleLineInterruptEnable);
++	LPUART_DisableInterrupts(lpuart, kLPUART_IdleLineInterruptEnable |
++				 kLPUART_RxOverrunInterruptEnable);
+ 	LPUART_ClearStatusFlags(lpuart, kLPUART_IdleLineFlag);
+ 	LPUART_EnableRxDMA(lpuart, false);
+ 
+@@ -833,7 +839,8 @@ static int mcux_lpuart_rx_enable(const struct device *dev, uint8_t *buf, const s
+ 	rx_dma_params->buf = buf;
+ 	rx_dma_params->buf_len = len;
+ 
+-	LPUART_EnableInterrupts(config->base, kLPUART_IdleLineInterruptEnable);
++	LPUART_EnableInterrupts(config->base, kLPUART_IdleLineInterruptEnable |
++				kLPUART_RxOverrunInterruptEnable);
+ 	prepare_rx_dma_block_config(dev);
+ 	const int ret = configure_and_start_rx_dma(config, data, lpuart);
+ 
+@@ -921,6 +928,17 @@ static inline void mcux_lpuart_async_isr(struct mcux_lpuart_data *data,
+ 				  data->async.rx_dma_params.timeout_us);
+ 		LPUART_ClearStatusFlags(config->base, kLPUART_IdleLineFlag);
+ 	}
++	/* The receiver stores nothing while OR is set ("Clear overrun flag,
++	 * otherwise the RX does not work", fsl_lpuart.c), and this driver
++	 * never cleared it. Clear it at once and report it; RX stays enabled. */
++	if (status & kLPUART_RxOverrunFlag) {
++		LPUART_ClearStatusFlags(config->base, kLPUART_RxOverrunFlag);
++		struct uart_event event = {
++			.type = UART_RX_STOPPED,
++			.data.rx_stop.reason = UART_ERROR_OVERRUN,
++		};
++		async_user_callback(data->async.uart_dev, &event);
++	}
+ }
+ #endif
+ 

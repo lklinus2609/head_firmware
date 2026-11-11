@@ -8,6 +8,13 @@ do. Full commands are in `../README.md`.
 |---|---|---|---|---|---|
 | `production/` | `prj.conf;prj_production_storage.conf` | `teensy41.overlay` | yes | yes | (none) |
 | `bench-no-fan/` | `prj.conf;prj_production_storage.conf` | `teensy41.overlay` | yes | yes | `HEAD_BENCH_NO_FAN=ON` |
+| `bus-stats/` | `prj.conf;prj_production_storage.conf` | `teensy41.overlay` | yes | yes | `HEAD_BENCH_NO_FAN=ON` (2026-10-06 diagnostics image A3, no receive fixes) |
+| `jog-present-pose/` | `prj.conf;prj_production_storage.conf` | `teensy41.overlay` | yes | yes | `HEAD_BENCH_NO_FAN=ON` (2026-10-08: enable at present pose, position range, needs `../patches/` applied) |
+| `present-pwm/` | `prj.conf;prj_production_storage.conf` | `teensy41.overlay` | yes | yes | `HEAD_BENCH_NO_FAN=ON` (2026-10-13: `jog-present-pose` sources plus the `PRESENT_PWM` message, needs `../patches/` applied) |
+| `rx-fixes/` | `prj.conf;prj_production_storage.conf` | `teensy41.overlay` | yes | yes | `HEAD_BENCH_NO_FAN=ON` (2026-10-06 image B: receive fixes, needs `../patches/` applied) |
+| `per-servo-tuning/` | `prj.conf;prj_production_storage.conf` | `teensy41.overlay` | yes | yes | `HEAD_BENCH_NO_FAN=ON` (2026-10-20: `present-pwm` sources plus per-servo tuning caps, min of limit and `operating_current_ma`; patches applied) |
+| `baseline-20261020/` | `prj.conf;prj_production_storage.conf` | `teensy41.overlay` | yes | yes | `HEAD_BENCH_NO_FAN=ON` (2026-10-20 rebuild of today's sources before the per-servo change; byte-identical to `present-pwm/`) |
+| `prep-diag/` | `prj.conf;prj_production_storage.conf` | `teensy41.overlay` | yes | yes | `HEAD_BENCH_NO_FAN=ON` (2026-11-10: today's sources, patches applied, plus DIAGNOSTICS byte 173 = last failed Enable/homing preparation step, `(phase << 5) \| servo`; built, NOT flashed) |
 | `bench-j3-no-fan/` | `prj.conf` only | `teensy41.overlay` | **no** | **no** | `HEAD_BENCH_NO_FAN=ON` |
 | `bench-j3-id10-no-fan/` | `prj.conf` only | `teensy41.overlay` | **no** | **no** | `HEAD_BENCH_NO_FAN=ON` |
 | `bench-no-12v/` | `prj.conf;prj_bench_no_12v.conf` | `teensy41_bench_no_12v.overlay` | **no** | **no** | `HEAD_BENCH_NO_12V=ON` |
@@ -43,3 +50,16 @@ Create or refresh named variants with `west build -p always` and the full board,
 source-directory, and CMake arguments; do not run Ninja directly inside a legacy
 cache. Note that `-p always` deletes the build directory before configuring, so
 a malformed command destroys the existing image as well as failing.
+
+`bisect-*/` (2026-10-06) are one-off images for the receive-path bisect in
+`../../docs/reviews/FIRMWARE_AUDIT_2026-10-05.md` section 8; the driver
+switches they used were removed afterwards, so they cannot be rebuilt as-is.
+`rx-fresh-buffer/` is image C: image B's fixes without the eDMA handler
+change, plus a fresh 1024-byte receive buffer before each Sync Read.
+`jog-present-pose/` (2026-10-08) is image D's sources plus
+`ENABLE_AT_PRESENT_POSE`, `POSITION_RANGE` and `q` seeding at Enable, built
+with the same flags as `rx-fresh-all/` (`HEAD_BENCH_NO_FAN=ON`, patches
+applied).
+`rx-fresh-all/` is image D: image C, with every request that expects a reply
+(not only telemetry) sent through `dxl_send_request()`, which restarts the
+receiver first; `headctl bus-stats` also reports control-loop timing.

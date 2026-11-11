@@ -23,6 +23,13 @@ from head_msgs.srv import (AcquireControl, ClearFault, Disable, Enable,
                            ConfirmCalibration, GetConfiguration, ReleaseControl,
                            RenewControl, SetFanOverride, StartProprioception,
                            StartRouting)
+from .headctl import (AUTO_PORT, CAP_ENABLE_AT_PRESENT_POSE, CAP_POSITION_RANGE,
+                      ENABLE_AT_PRESENT_POSE as MSG_ENABLE_AT_PRESENT_POSE,
+                      GET_POSITION_RANGE as MSG_GET_POSITION_RANGE,
+                      POSITION_RANGE as MSG_POSITION_RANGE,
+                      STATE_POSITION_RANGE_GENERATION_OFFSET, decode_diagnostics,
+                      decode_position_range, describe_reset_cause,
+                      normalized_position, open_head_serial)
 from .serial_transport import (SerialTransport, TransportDisconnected,
                                TransportError, TransportTimeout)
 
@@ -133,7 +140,9 @@ class HeadBridge(Node):
         super().__init__("head_bridge")
         # CDC0 is the Zephyr diagnostic console. CDC1 is the dedicated,
         # framed head-control endpoint; keep protocol traffic off the console.
-        self.declare_parameter("port", "/dev/ttyACM1")
+        # AUTO_PORT reopens CDC1 by its /dev/serial/by-id link on every
+        # reconnect, because a reset can move it to a new ttyACM number.
+        self.declare_parameter("port", AUTO_PORT)
         self.declare_parameter("baud", 115200)
         self.declare_parameter("joint_names", [f"servo_{index}" for index in range(SERVO_COUNT)])
         # Twelve actuators (IDs 0..11) are installed today.  The value is a
@@ -156,13 +165,19 @@ class HeadBridge(Node):
         self.firmware_control_deadline_misses = 0
         self.firmware_control_max_period_us = 0
         self.firmware_protocol_errors = 0
-        self.branch_diagnostics: dict[int, tuple[int, int, int]] = {}
+        self.branch_diagnostics: dict[int, tuple[int, int, int, int]] = {}
         self.configuration_version = 0
         self.configuration_synced = False
         self.hello_validated = False
         self.controller_session_id: Optional[int] = None
+        # Boot session of the last accepted HELLO; a change is a reboot.
+        self.hello_session_id: Optional[int] = None
         self.negotiation_generation = 0
         self.negotiation_in_progress = False
+        # Last POSITION_RANGE reply. Normalized positions are published only
+        # while its generation equals the one in the latest STATE sample.
+        self.position_range: Optional[dict] = None
+        self.position_range_request_pending = False
 
         sensor_qos = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT)
         command_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
@@ -174,6 +189,8 @@ class HeadBridge(Node):
         self.create_service(AcquireControl, "/head/acquire_control", self.acquire_control, callback_group=self.callback_group)
         self.create_service(ReleaseControl, "/head/release_control", self.release_control, callback_group=self.callback_group)
         self.create_service(Enable, "/head/enable", self.enable, callback_group=self.callback_group)
+        self.create_service(Enable, "/head/enable_at_present_pose", self.enable_at_present_pose,
+                            callback_group=self.callback_group)
         self.create_service(StartProprioception, "/head/start_proprioception",
                             self.start_proprioception, callback_group=self.callback_group)
         self.create_service(StartRouting, "/head/start_routing",
@@ -201,6 +218,7 @@ class HeadBridge(Node):
             self._on_transport_disconnect,
             lambda: Future(executor=self.executor),
             session_id_provider=lambda: self.controller_session_id,
+            serial_factory=open_head_serial,
         )
         self.transport.set_byte_handler(self._on_serial_byte)
         self.transport.start()
@@ -282,6 +300,7 @@ class HeadBridge(Node):
         self.negotiation_in_progress = False
         self.last_state_monotonic_s = 0.0
         self.capabilities = 0
+        self.position_range = None
         self.transport.reset_pending(reason)
 
     def _retry_negotiation(self) -> None:
@@ -374,12 +393,21 @@ class HeadBridge(Node):
             self.configuration_synced = False
             self.hello_validated = False
             self.negotiation_generation += 1
+            self.position_range = None
             self.transport.reset_pending("controller HELLO session changed")
         self.firmware_identity = (
             f"firmware={fw_major}.{fw_minor}.{fw_patch} build={build_id:08x} "
             f"hardware={hardware_id:08x}/r{hardware_revision} schema={schema_hash:08x} "
             f"session={session_id:08x} rates={control_hz}/{telemetry_hz}Hz "
             f"usb={usb_vid:04x}:{usb_pid:04x}")
+        if session_id != self.hello_session_id:
+            message = (f"controller session {session_id:08x}, last restart cause "
+                       f"{describe_reset_cause(reset_cause)}")
+            if self.hello_session_id is None:
+                self.get_logger().info(message)
+            else:
+                self.get_logger().warning(f"controller rebooted: {message}")
+            self.hello_session_id = session_id
         self.hello_validated = True
         self.capabilities = capabilities
         self.controller_session_id = session_id
@@ -461,6 +489,27 @@ class HeadBridge(Node):
 
     async def enable(self, request: Enable.Request, response: Enable.Response) -> Enable.Response:
         response.enabled, response.reason = await self._lease_command(MSG_ENABLE, request.lease_token)
+        return response
+
+    async def enable_at_present_pose(self, request: Enable.Request,
+                                     response: Enable.Response) -> Enable.Response:
+        """ENABLED from HOMING_REQUIRED without homing; q maps to the profile range."""
+        if not getattr(self, "capabilities", 0) & CAP_ENABLE_AT_PRESENT_POSE:
+            response.enabled, response.reason = (
+                False, "firmware does not advertise enable at present pose")
+            return response
+        if request.lease_token == 0 or request.lease_token != self.lease_token:
+            response.enabled, response.reason = False, "invalid local lease token"
+            return response
+        ok, payload = await self.request(MSG_ENABLE_AT_PRESENT_POSE,
+                                         struct.pack("<I", request.lease_token))
+        result = struct.unpack_from("<b", payload, 1)[0] if len(payload) >= 2 else 0
+        response.enabled = ok
+        response.reason = ("accepted" if ok else
+                           "an active servo is outside its profile min_tick..max_tick"
+                           if result == -34 else
+                           "firmware rejected command (needs torque-off HOMING_REQUIRED, "
+                           "a valid profile and fresh feedback)")
         return response
 
     async def start_proprioception(self, request: StartProprioception.Request,
@@ -651,6 +700,7 @@ class HeadBridge(Node):
         self.controller_session_id = incoming_boot_session_id
         state.boot_session_id = incoming_boot_session_id
         state.active_servo_mask = self.active_servo_mask
+        ranges = self._current_position_ranges(payload[STATE_POSITION_RANGE_GENERATION_OFFSET])
         offset = 32
         for index, name in enumerate(self.joint_names):
             goal, present, velocity, current, voltage, temperature, moving, hw_error, online, age = struct.unpack_from(
@@ -660,8 +710,13 @@ class HeadBridge(Node):
             servo.name = name
             servo.goal_tick, servo.present_tick = goal, present
             servo.present_velocity_raw = velocity
-            servo.goal_normalized = float("nan")
-            servo.present_normalized = float("nan")
+            tick_range = ranges.get(index)
+            if tick_range is None:
+                servo.goal_normalized = float("nan")
+                servo.present_normalized = float("nan")
+            else:
+                servo.goal_normalized = normalized_position(goal, tick_range)
+                servo.present_normalized = normalized_position(present, tick_range)
             servo.current_ma, servo.voltage_mv = current, voltage
             servo.temperature_c, servo.moving_status, servo.hardware_error = temperature, moving, hw_error
             servo.online, servo.feedback_age_ms = bool(online), age
@@ -670,34 +725,70 @@ class HeadBridge(Node):
         self.last_state_monotonic_s = time.monotonic()
         self.state_publisher.publish(state)
 
+    def _current_position_ranges(self, generation: int) -> dict:
+        """Ranges to publish normalized positions with, or {} when unknown.
+
+        A cached POSITION_RANGE is used only while its generation matches the
+        STATE sample's; otherwise the servos get NaN and a fresh range is
+        requested, so a range from before homing or a profile change is never
+        applied to newer ticks.
+        """
+        if not getattr(self, "capabilities", 0) & CAP_POSITION_RANGE:
+            return {}
+        cached = self.position_range
+        if cached is not None and cached["generation"] == generation:
+            return cached["ranges"]
+        self._request_position_range()
+        return {}
+
+    def _request_position_range(self) -> None:
+        if self.position_range_request_pending:
+            return
+        generation = self.negotiation_generation
+        try:
+            future = self.transport.request(MSG_GET_POSITION_RANGE, timeout_s=1.0,
+                                            response_types=(MSG_POSITION_RANGE,))
+        except TransportError as error:
+            self.get_logger().warning(f"position range request not sent: {error}")
+            return
+        self.position_range_request_pending = True
+
+        def completed(result: Future) -> None:
+            self.position_range_request_pending = False
+            if generation != self.negotiation_generation:
+                return
+            try:
+                ok, payload, _ = result.result()
+                if not ok:
+                    raise TransportError("position range request rejected")
+                self.position_range = decode_position_range(payload)
+            except Exception as error:
+                self.position_range = None
+                self.get_logger().warning(f"position range unavailable: {error}")
+
+        future.add_done_callback(completed)
+
     def on_diagnostics(self, payload: bytes) -> None:
-        if len(payload) < 14:
+        try:
+            report = decode_diagnostics(payload)
+        except RuntimeError:
             self.packet_errors += 1
             return
-        (_, _, self.firmware_control_deadline_misses, _,
-         self.firmware_control_max_period_us) = struct.unpack_from("<BBIII", payload, 0)
-        offset = 14
-        self.firmware_protocol_errors = 0
-        self.branch_diagnostics.clear()
-        while offset + 36 <= len(payload) - 12:
-            branch, _, _, _ = struct.unpack_from("<BBBB", payload, offset)
-            (_, _, _, protocol_errors, bus_errors, _, transmission_errors,
-             deferred) = struct.unpack_from("<IIIIIIII", payload, offset + 4)
-            self.firmware_protocol_errors += protocol_errors
-            self.branch_diagnostics[branch] = (
-                protocol_errors, bus_errors, transmission_errors, deferred)
-            offset += 36
-        if len(payload) - offset >= 12:
-            (self.usb_dropped_frames, self.usb_dropped_bytes,
-             self.usb_coalesced_frames) = struct.unpack_from("<III", payload, offset)
-            offset += 12
-        if len(payload) - offset >= 12:
-            self.storage_state = payload[offset]
-            (self.storage_result,
-             self.calibration_generation) = struct.unpack_from("<iI", payload, offset + 4)
-            offset += 12
-        if len(payload) - offset >= 4:
-            self.reset_cause = struct.unpack_from("<I", payload, offset)[0]
+        self.firmware_control_deadline_misses = report["control_deadline_misses"]
+        self.firmware_control_max_period_us = report["control_max_period_us"]
+        self.firmware_protocol_errors = sum(
+            branch["protocol_errors"] for branch in report["branches"])
+        self.branch_diagnostics = {
+            branch["index"]: (branch["protocol_errors"], branch["bus_errors"],
+                              branch["transmission_errors"], branch["deferred"])
+            for branch in report["branches"]}
+        self.usb_dropped_frames = report["usb_dropped_frames"]
+        self.usb_dropped_bytes = report["usb_dropped_bytes"]
+        self.usb_coalesced_frames = report["usb_coalesced_frames"]
+        self.storage_state = report["storage_state"]
+        self.storage_result = report["storage_result"]
+        self.calibration_generation = report["generation"]
+        self.reset_cause = report["reset_cause"]
 
     def publish_diagnostics(self) -> None:
         if not self.configuration_synced:

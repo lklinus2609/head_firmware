@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <stdlib.h>
 
 #include "config.h"
@@ -118,6 +119,7 @@ bool head_state_confirm_maintenance_servo(struct head_runtime *runtime,
       servo_index >= HEAD_SERVO_COUNT) return false;
   calibration->joints[servo_index].home_tick = runtime->homing_zero_tick[servo_index];
   head_config_finalize(calibration);
+  head_control_note_position_range_changed(runtime);
   ++runtime->homing_index;
   runtime->homing_started_ms = 0u;
   runtime->homing_qualified_since_ms = 0u;
@@ -133,6 +135,39 @@ bool head_state_request_enable(struct head_runtime *runtime)
   runtime->last_command_ms = 0u;
   runtime->watchdog_hold_started_ms = 0u;
   return true;
+}
+
+/* ENABLED without homing, for a head whose ranges were found by tuning and
+ * written to the profile. Homing moves servos, which a tensioned head must not
+ * do, so q is mapped to the profile's raw min_tick..max_tick instead of to a
+ * homing reference. That is only meaningful when every active servo is already
+ * inside its range, so anything else is refused with -ERANGE rather than
+ * clamped: clamping would command a move to the range end at Enable. Any
+ * homing reference left from earlier in this boot is dropped. The caller then
+ * prepares torque with HEAD_ENABLED as the target, and preparation completion
+ * seeds q from the freshly read positions and checks the range again. */
+int head_state_request_enable_at_present_pose(struct head_runtime *runtime,
+                                              const struct head_calibration *calibration)
+{
+  if (runtime->state != HEAD_HOMING_REQUIRED ||
+      !head_state_can_prepare_motion(runtime) ||
+      !head_config_validate(calibration)) {
+    return -EPERM;
+  }
+  for (uint8_t index = 0u; index < HEAD_SERVO_COUNT; ++index) {
+    if ((calibration->active_servo_mask & (1u << index)) == 0u) continue;
+    const struct head_joint_config *joint = &calibration->joints[index];
+    const int32_t present_tick = runtime->servos[index].present_tick;
+    if (joint->min_tick >= joint->max_tick ||
+        present_tick < joint->min_tick || present_tick > joint->max_tick) {
+      return -ERANGE;
+    }
+  }
+  for (uint8_t index = 0u; index < HEAD_SERVO_COUNT; ++index) {
+    runtime->homing_reference_valid[index] = false;
+  }
+  head_control_note_position_range_changed(runtime);
+  return 0;
 }
 
 bool head_state_request_proprioception(struct head_runtime *runtime,
@@ -173,6 +208,96 @@ bool head_state_request_routing(struct head_runtime *runtime,
   runtime->accepted_sequence_valid = false;
   runtime->pending_transmit_valid = false;
   return true;
+}
+
+/* Tuning starts from HOMING_REQUIRED without homing: limits and tensions are
+ * not known yet, which is what tuning is for. The caller prepares torque with
+ * HEAD_TUNING as the target, and preparation seeds every goal from the present
+ * position, so entering tuning commands no motion. Each active servo's Goal
+ * Current is the requested limit or its own commissioned operating_current_ma,
+ * whichever is lower (head_state_tuning_limit_ma), so one joint can be allowed
+ * more than the others: on 2026-10-20 the jaw (7) got 650 mA peaks while the
+ * modiolus lines stayed at 300 mA. The request must be within the highest
+ * operating_current_ma; a request above every servo's would cap nothing. */
+bool head_state_request_tuning(struct head_runtime *runtime,
+                               const struct head_calibration *calibration,
+                               uint16_t current_limit_ma)
+{
+  if (runtime->state != HEAD_HOMING_REQUIRED ||
+      !head_state_can_prepare_motion(runtime) ||
+      !head_config_validate(calibration) || current_limit_ma == 0u) {
+    return false;
+  }
+  uint16_t highest_ma = 0u;
+  for (uint8_t index = 0u; index < HEAD_SERVO_COUNT; ++index) {
+    if ((calibration->active_servo_mask & (1u << index)) == 0u) continue;
+    if (calibration->joints[index].operating_current_ma <= 0) return false;
+    if ((uint16_t)calibration->joints[index].operating_current_ma > highest_ma) {
+      highest_ma = (uint16_t)calibration->joints[index].operating_current_ma;
+    }
+  }
+  if (current_limit_ma > highest_ma) return false;
+  runtime->tuning_current_limit_ma = current_limit_ma;
+  return true;
+}
+
+uint16_t head_state_tuning_limit_ma(const struct head_runtime *runtime,
+                                    const struct head_calibration *calibration,
+                                    uint8_t servo_index)
+{
+  const int16_t operating_ma = calibration->joints[servo_index].operating_current_ma;
+  if (operating_ma <= 0) return 0u;
+  return runtime->tuning_current_limit_ma < (uint16_t)operating_ma ?
+      runtime->tuning_current_limit_ma : (uint16_t)operating_ma;
+}
+
+static int64_t tuning_max_lag_ticks(uint16_t current_limit_ma)
+{
+  const int64_t lag_ticks = current_limit_ma / HEAD_TUNING_LAG_CURRENT_MA_PER_TICK;
+  return lag_ticks > HEAD_TUNING_MIN_LAG_TICKS ? lag_ticks : HEAD_TUNING_MIN_LAG_TICKS;
+}
+
+/* One operator click: move one servo by step_ticks (1 to
+ * HEAD_TUNING_MAX_STEP_TICKS either way), toward or away from its neutral. A step toward neutral is always allowed, so a servo
+ * that has reached its limit can always be backed off. A step away from
+ * neutral is refused at one turn of travel, or while the servo is saturated
+ * at the current limit or trailing its goal -- the mechanism is resisting. */
+int head_state_tuning_step(struct head_runtime *runtime,
+                           const struct head_calibration *calibration,
+                           uint8_t servo_index, int8_t step_ticks, uint32_t now_ms)
+{
+  if (runtime->state != HEAD_TUNING || runtime->fault != HEAD_FAULT_NONE ||
+      !head_state_torque_verified_on(runtime) || runtime->shutdown_requested) {
+    return -EPERM;
+  }
+  if (servo_index >= HEAD_SERVO_COUNT ||
+      (calibration->active_servo_mask & (1u << servo_index)) == 0u ||
+      step_ticks == 0 || step_ticks > HEAD_TUNING_MAX_STEP_TICKS ||
+      step_ticks < -HEAD_TUNING_MAX_STEP_TICKS) {
+    return -EINVAL;
+  }
+  struct head_servo_state *servo = &runtime->servos[servo_index];
+  if (servo->last_current_feedback_ms == 0u ||
+      now_ms - servo->last_current_feedback_ms > HEAD_COMMAND_FEEDBACK_FRESH_MS) {
+    return -EAGAIN;
+  }
+  const int64_t neutral = runtime->tuning_neutral_tick[servo_index];
+  const int64_t goal = (int64_t)servo->goal_tick + step_ticks;
+  const int64_t travel = llabs(goal - neutral);
+  if (goal < HEAD_DXL_POSITION_MIN_TICK || goal > HEAD_DXL_POSITION_MAX_TICK ||
+      travel > HEAD_TUNING_MAX_TRAVEL_TICKS) {
+    return -ERANGE;
+  }
+  const uint16_t limit_ma = head_state_tuning_limit_ma(runtime, calibration, servo_index);
+  if (travel > llabs((int64_t)servo->goal_tick - neutral) &&
+      (abs(servo->present_current_ma) >= limit_ma ||
+       llabs((int64_t)servo->goal_tick - servo->present_tick) >=
+           tuning_max_lag_ticks(limit_ma))) {
+    return -EBUSY;
+  }
+  servo->goal_tick = (int32_t)goal;
+  servo->goal_step_ticks_per_control_cycle = 0;
+  return 0;
 }
 
 bool head_state_torque_may_be_on(const struct head_runtime *runtime)
@@ -365,6 +490,7 @@ void head_state_homing_tick(struct head_runtime *runtime,
     if (error > zero_settled_limit) return;
     runtime->homing_zero_tick[active_index] = target;
     runtime->homing_reference_valid[active_index] = true;
+    head_control_note_position_range_changed(runtime);
     if (!head_control_reference_valid(runtime, calibration, active_index)) {
       head_state_fault(runtime, HEAD_FAULT_HOMING);
       return;
@@ -434,6 +560,7 @@ void head_state_homing_tick(struct head_runtime *runtime,
     } else if ((now_ms - runtime->homing_qualified_since_ms) >= joint->homing_persistence_ms) {
       runtime->homing_zero_tick[active_index] = servo->present_tick;
       runtime->homing_reference_valid[active_index] = true;
+      head_control_note_position_range_changed(runtime);
       if (!head_control_reference_valid(runtime, calibration, active_index)) {
         head_state_fault(runtime, HEAD_FAULT_HOMING);
         return;

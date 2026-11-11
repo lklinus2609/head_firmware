@@ -275,9 +275,10 @@ class SerialTransport:
     def _response_transaction(message_type: int, payload: bytes) -> Optional[int]:
         if message_type in (14, 15) and len(payload) >= 10:
             return int.from_bytes(payload[6:10], "little")
-        # HELLO_REPLY carries the transaction ID at the beginning.  The
-        # configuration response intentionally has no transaction ID in v2.
-        if message_type == 2 and len(payload) >= 4:
+        # HELLO_REPLY and POSITION_RANGE carry the transaction ID at the
+        # beginning.  The configuration response intentionally has no
+        # transaction ID in v2.
+        if message_type in (2, 46) and len(payload) >= 4:
             return int.from_bytes(payload[:4], "little")
         return None
 

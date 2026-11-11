@@ -1,0 +1,128 @@
+{
+  "format": "head-tuning-record-1",
+  "started_utc": "2026-10-05T02:16:24.044259+00:00",
+  "current_limit_ma": 399,
+  "servos": {
+    "0": {
+      "branch": 0,
+      "neutral_tick": null,
+      "peak_current_ma": 0,
+      "marks": {}
+    },
+    "1": {
+      "branch": 0,
+      "neutral_tick": null,
+      "peak_current_ma": 0,
+      "marks": {}
+    },
+    "2": {
+      "branch": 0,
+      "neutral_tick": null,
+      "peak_current_ma": 0,
+      "marks": {}
+    },
+    "3": {
+      "branch": 0,
+      "neutral_tick": null,
+      "peak_current_ma": 0,
+      "marks": {}
+    },
+    "4": {
+      "branch": 0,
+      "neutral_tick": null,
+      "peak_current_ma": 0,
+      "marks": {}
+    },
+    "5": {
+      "branch": 3,
+      "neutral_tick": null,
+      "peak_current_ma": 0,
+      "marks": {}
+    },
+    "6": {
+      "branch": 3,
+      "neutral_tick": null,
+      "peak_current_ma": 0,
+      "marks": {}
+    },
+    "7": {
+      "branch": 3,
+      "neutral_tick": null,
+      "peak_current_ma": 0,
+      "marks": {}
+    },
+    "8": {
+      "branch": 3,
+      "neutral_tick": null,
+      "peak_current_ma": 0,
+      "marks": {}
+    },
+    "9": {
+      "branch": 3,
+      "neutral_tick": null,
+      "peak_current_ma": 0,
+      "marks": {}
+    },
+    "10": {
+      "branch": 2,
+      "neutral_tick": null,
+      "peak_current_ma": 0,
+      "marks": {}
+    },
+    "11": {
+      "branch": 2,
+      "neutral_tick": null,
+      "peak_current_ma": 0,
+      "marks": {}
+    },
+    "12": {
+      "branch": 2,
+      "neutral_tick": null,
+      "peak_current_ma": 0,
+      "marks": {}
+    },
+    "13": {
+      "branch": 2,
+      "neutral_tick": null,
+      "peak_current_ma": 0,
+      "marks": {}
+    },
+    "14": {
+      "branch": 2,
+      "neutral_tick": null,
+      "peak_current_ma": 0,
+      "marks": {}
+    },
+    "15": {
+      "branch": 1,
+      "neutral_tick": null,
+      "peak_current_ma": 0,
+      "marks": {}
+    },
+    "16": {
+      "branch": 1,
+      "neutral_tick": null,
+      "peak_current_ma": 0,
+      "marks": {}
+    },
+    "17": {
+      "branch": 1,
+      "neutral_tick": null,
+      "peak_current_ma": 0,
+      "marks": {}
+    },
+    "18": {
+      "branch": 1,
+      "neutral_tick": null,
+      "peak_current_ma": 0,
+      "marks": {}
+    },
+    "19": {
+      "branch": 1,
+      "neutral_tick": null,
+      "peak_current_ma": 0,
+      "marks": {}
+    }
+  },
+  "steps": []
+}

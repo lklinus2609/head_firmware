@@ -66,6 +66,54 @@ enum head_dxl_discovery_reason {
   HEAD_DXL_DISCOVERY_CURRENT_LIMIT,
 };
 uint8_t head_dxl_discovery_reason(uint8_t servo_index);
+
+/* Where the telemetry path was, for the watchdog black box in main.c. Kept in
+ * uncached no-init DTCM so it can survive a watchdog reset. */
+enum head_dxl_trace_point {
+  HEAD_DXL_TRACE_NONE = 0,
+  HEAD_DXL_TRACE_CONSUME,
+  HEAD_DXL_TRACE_BUILD,
+  HEAD_DXL_TRACE_DRAIN,
+  HEAD_DXL_TRACE_WRITE,
+  HEAD_DXL_TRACE_DONE,
+};
+struct head_dxl_trace {
+  uint32_t point;
+  uint32_t branch_index;
+  uint32_t drain_count;   /* read_available() calls in the current drain */
+  uint32_t point_ms;
+  uint32_t consume_used;      /* bytes buffered when telemetry_consume() began */
+  uint32_t consume_loops;     /* parse-loop passes in the current consume */
+  uint32_t bad_used_count;    /* times a buffered count above capacity was reset */
+  uint32_t bad_used_value;    /* the last such out-of-range count */
+};
+extern struct head_dxl_trace head_dxl_trace;
+
+/* Telemetry receive counts since boot, per branch. They separate a reply lost
+ * on the wire (no byte arrived) from one damaged in transit (bytes arrived,
+ * no valid packet), and say how the damaged bytes failed. */
+struct head_dxl_bus_stats {
+  uint32_t request_count;            /* Sync Read requests transmitted */
+  uint32_t complete_count;           /* requests answered by every member */
+  uint32_t silent_timeout_count;     /* timeouts with no byte received */
+  uint32_t partial_timeout_count;    /* timeouts with at least one byte received */
+  uint32_t received_byte_count;
+  uint32_t drained_byte_count;       /* stale bytes discarded before a request */
+  uint32_t resync_byte_count;        /* bytes skipped while searching for a header */
+  uint32_t bad_length_count;         /* header with an impossible LEN field */
+  uint32_t bad_packet_count;         /* whole packet failing CRC or structure checks */
+  uint32_t unknown_id_count;         /* valid packet from an ID not on this branch */
+  uint32_t servo_error_count;        /* valid packet with a nonzero error field */
+  uint32_t write_failure_count;      /* Sync Read requests that failed to transmit */
+  uint32_t rx_restart_failure_count;
+  /* Bad packets followed by a header exactly where they end (bytes changed
+   * in place) or elsewhere (bytes lost or added). */
+  uint32_t bad_in_place_count;
+  uint32_t bad_shifted_count;
+};
+void head_dxl_bus_stats(uint8_t branch_index, struct head_dxl_bus_stats *stats);
+/* Telemetry replies this servo has missed since boot. */
+uint32_t head_dxl_missed_reply_count(uint8_t servo_index);
 /* Register address and raw status byte of the last rejected transfer. */
 void head_dxl_last_transaction_error(uint16_t *address, uint8_t *status);
 /* Read-only control-table access for bring-up. Tolerates a Hardware Alert so
@@ -76,6 +124,10 @@ int head_dxl_debug_read(uint8_t branch_index, uint8_t servo_id, uint16_t address
 /* Saturating total of retried transfers: transient bus loss stays visible
  * instead of being silently absorbed by the retries. */
 uint16_t head_dxl_read_retry_count(void);
+/* The last Enable/homing preparation step that failed for good (after its
+ * retries), as (phase << 5) | servo_index; servo 31 = no servo (phase 0, the
+ * emergency torque-off). 0 = none since boot. Reported in DIAGNOSTICS. */
+uint8_t head_dxl_last_preparation_failure(void);
 uint32_t head_dxl_take_hardware_alert_mask(void);
 int head_dxl_init(void);
 /* Sequential read-only Protocol 2.0 Pings. It never writes Torque Enable,

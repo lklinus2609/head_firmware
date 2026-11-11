@@ -1,0 +1,29 @@
+#!/bin/sh
+# Location-independent launcher for the live face camera window
+# (camera_preview.py). It needs PyQt5, pyrealsense2, numpy and Pillow;
+# bench/.venv carries all of them (bench/requirements.txt).
+set -eu
+
+script_path=$0
+# Follow symlinks so this can be linked into ~/.local/bin.
+while [ -L "$script_path" ]; do
+  link=$(readlink "$script_path")
+  case $link in
+    /*) script_path=$link ;;
+     *) script_path=$(dirname "$script_path")/$link ;;
+  esac
+done
+scripts_dir=$(CDPATH= cd -- "$(dirname -- "$script_path")" && pwd)
+firmware_dir=$(dirname -- "$scripts_dir")
+project_dir=$(dirname -- "$firmware_dir")
+
+preview_py=$firmware_dir/host_ros/src/head_ros/head_ros/camera_preview.py
+[ -f "$preview_py" ] || { echo "face-preview: cannot find $preview_py" >&2; exit 1; }
+
+candidate=$project_dir/bench/.venv/bin/python3
+if [ -x "$candidate" ] && "$candidate" -c "import PyQt5.QtWidgets, pyrealsense2, numpy, PIL" 2>/dev/null; then
+  exec "$candidate" "$preview_py" "$@"
+fi
+echo "face-preview: bench/.venv needs PyQt5, pyrealsense2, numpy and Pillow." >&2
+echo "Install bench/requirements.txt into bench/.venv (see bench/README.md)." >&2
+exit 1

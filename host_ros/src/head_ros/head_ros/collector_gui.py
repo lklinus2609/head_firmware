@@ -65,6 +65,7 @@ class HeadStateValues:
         8: "PROPRIOCEPTION_SETTLING",
         9: "PROPRIOCEPTION_HOLD",
         10: "ROUTING",
+        11: "TUNING",
     }
 
 try:

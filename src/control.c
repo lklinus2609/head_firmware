@@ -1,5 +1,6 @@
 #include <string.h>
 
+#include "config.h"
 #include "control.h"
 #include "state_machine.h"
 
@@ -93,6 +94,7 @@ void head_control_init(struct head_runtime *runtime,
          sizeof(runtime->homing_motion_remainder_ticks_per_second));
   memset(runtime->homing_reference_valid, 0,
          sizeof(runtime->homing_reference_valid));
+  head_control_note_position_range_changed(runtime);
   runtime->last_command_ms = 0u;
   runtime->watchdog_hold_started_ms = 0u;
   runtime->last_accepted_sequence = 0u;
@@ -144,33 +146,75 @@ bool head_control_accept_command(struct head_runtime *runtime,
   return true;
 }
 
-bool head_control_reference_valid(const struct head_runtime *runtime,
-                                  const struct head_calibration *calibration,
-                                  uint8_t servo_index)
+bool head_control_position_range(const struct head_runtime *runtime,
+                                 const struct head_calibration *calibration,
+                                 uint8_t servo_index, int32_t *minimum_tick,
+                                 int32_t *maximum_tick)
 {
   if (servo_index >= HEAD_SERVO_COUNT) return false;
   const struct head_joint_config *joint = &calibration->joints[servo_index];
   const int64_t reference = runtime->homing_reference_valid[servo_index] ?
       runtime->homing_zero_tick[servo_index] : joint->home_tick;
-  const int64_t minimum_tick = reference + (int64_t)joint->min_tick - joint->home_tick;
-  const int64_t maximum_tick = reference + (int64_t)joint->max_tick - joint->home_tick;
-  return minimum_tick >= HEAD_DXL_POSITION_MIN_TICK &&
-         maximum_tick <= HEAD_DXL_POSITION_MAX_TICK && minimum_tick < maximum_tick;
+  const int64_t minimum = reference + (int64_t)joint->min_tick - joint->home_tick;
+  const int64_t maximum = reference + (int64_t)joint->max_tick - joint->home_tick;
+  if (minimum < HEAD_DXL_POSITION_MIN_TICK || maximum > HEAD_DXL_POSITION_MAX_TICK ||
+      minimum >= maximum) {
+    return false;
+  }
+  if (minimum_tick != NULL) *minimum_tick = (int32_t)minimum;
+  if (maximum_tick != NULL) *maximum_tick = (int32_t)maximum;
+  return true;
+}
+
+bool head_control_reference_valid(const struct head_runtime *runtime,
+                                  const struct head_calibration *calibration,
+                                  uint8_t servo_index)
+{
+  return head_control_position_range(runtime, calibration, servo_index, NULL, NULL);
+}
+
+void head_control_note_position_range_changed(struct head_runtime *runtime)
+{
+  ++runtime->position_range_generation;
 }
 
 int32_t head_control_target_tick(const struct head_runtime *runtime,
                                  const struct head_calibration *calibration,
                                  uint8_t servo_index)
 {
-  if (!head_control_reference_valid(runtime, calibration, servo_index)) return 0;
-  const struct head_joint_config *joint = &calibration->joints[servo_index];
-  const int32_t reference = runtime->homing_reference_valid[servo_index]
-      ? runtime->homing_zero_tick[servo_index] : joint->home_tick;
-  const int32_t minimum = reference + (joint->min_tick - joint->home_tick);
-  const int32_t maximum = reference + (joint->max_tick - joint->home_tick);
+  int32_t minimum;
+  int32_t maximum;
+  if (!head_control_position_range(runtime, calibration, servo_index, &minimum, &maximum)) {
+    return 0;
+  }
   const int32_t target = minimum + (int32_t)((float)(maximum - minimum) *
                          clamp_unit(runtime->requested_position_normalized[servo_index]));
   return clamp_i32(target, minimum, maximum);
+}
+
+/* On entry to ENABLED the requested q must be the pose the servos are in.
+ * Otherwise head_control_tick() drives toward whatever q was left over (0.5
+ * from boot, or the previous session's last target) before the host has sent
+ * anything. Half a tick is added before dividing so that the float product in
+ * head_control_target_tick() truncates back to the same tick instead of one
+ * below it; the result is checked rather than trusted. */
+bool head_control_seed_requested_positions(struct head_runtime *runtime,
+                                           const struct head_calibration *calibration)
+{
+  for (uint8_t servo_index = 0u; servo_index < HEAD_SERVO_COUNT; ++servo_index) {
+    if (!is_active(calibration, servo_index)) continue;
+    int32_t minimum;
+    int32_t maximum;
+    const int32_t goal = runtime->servos[servo_index].goal_tick;
+    if (!head_control_position_range(runtime, calibration, servo_index, &minimum, &maximum) ||
+        goal < minimum || goal > maximum) {
+      return false;
+    }
+    runtime->requested_position_normalized[servo_index] = clamp_unit(
+        ((float)(goal - minimum) + 0.5f) / (float)(maximum - minimum));
+    if (head_control_target_tick(runtime, calibration, servo_index) != goal) return false;
+  }
+  return true;
 }
 
 uint32_t head_control_present_current_branch_ma(
@@ -179,14 +223,14 @@ uint32_t head_control_present_current_branch_ma(
     uint8_t branch_index)
 {
   uint32_t total_current_ma = 0u;
+  uint8_t servo_indexes[HEAD_SERVOS_PER_BRANCH];
   if (runtime == NULL || calibration == NULL || branch_index >= HEAD_BRANCH_COUNT) {
     return UINT32_MAX;
   }
-  const uint8_t first_servo = branch_index * HEAD_SERVOS_PER_BRANCH;
-  const uint8_t end_servo = first_servo + HEAD_SERVOS_PER_BRANCH;
-  for (uint8_t servo_index = first_servo; servo_index < end_servo; ++servo_index) {
-    if (!is_active(calibration, servo_index)) continue;
-    const int32_t current_ma = runtime->servos[servo_index].present_current_ma;
+  const uint8_t servo_count =
+      head_config_branch_servo_indexes(calibration, branch_index, servo_indexes);
+  for (uint8_t member = 0u; member < servo_count; ++member) {
+    const int32_t current_ma = runtime->servos[servo_indexes[member]].present_current_ma;
     total_current_ma += (uint32_t)(current_ma < 0 ? -current_ma : current_ma);
   }
   return total_current_ma;

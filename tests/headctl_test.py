@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 import struct
 import sys
+import tempfile
 import time
 from types import SimpleNamespace
 
@@ -196,6 +197,131 @@ def main() -> None:
     }
     assert report["branches"][0]["expected_mask"] == 0
     assert report["branches"][0]["timeouts"] == 0
+
+    # Header, USB counters and boot cause, at the offsets send_diagnostics()
+    # in src/main.c writes them.
+    struct.pack_into("<BBIII", diagnostics, 0, 7, 9, 3, 4567, 2500)
+    struct.pack_into("<III", diagnostics, 158, 11, 222, 33)
+    struct.pack_into("<I", diagnostics, 182, 0x10)
+    report = headctl.decode_diagnostics(bytes(diagnostics))
+    assert (report["state"], report["fault"]) == (7, 9)
+    assert report["control_deadline_misses"] == 3
+    assert report["last_control_cycle_ms"] == 4567
+    assert report["control_max_period_us"] == 2500
+    assert (report["usb_dropped_frames"], report["usb_dropped_bytes"],
+            report["usb_coalesced_frames"]) == (11, 222, 33)
+    assert report["reset_cause"] == 0x10
+    assert report["generation"] == 42
+    assert headctl.describe_reset_cause(0x10) == "watchdog (0x00000010)"
+    assert headctl.describe_reset_cause(0) == "unknown (0x00000000)"
+
+    # NACK results are (int8_t) negative picolibc errno values; magnitudes
+    # above 128 wrap to a positive byte and must still decode.
+    def nack(result: int) -> bytes:
+        return bytes((headctl.CLEAR_FAULT, result & 0xFF)) + bytes(12)
+    assert headctl.describe_firmware_error(nack(-1)) == "-EPERM (-1)"
+    assert headctl.describe_firmware_error(nack(-22)) == "-EINVAL (-22)"
+    assert headctl.describe_firmware_error(nack(-116)) == "-ETIMEDOUT (-116)"
+    assert headctl.describe_firmware_error(nack(-140)) == "-ECANCELED (-140)"
+    assert headctl.describe_firmware_error(nack(0)) == "accepted"
+    assert headctl.describe_firmware_error(b"") == "no reply from the controller"
+
+    # BUS_STATS: transaction ID, 4 branches x 26 counts, 20 missed-reply counts,
+    # in the order send_bus_stats() (src/main.c) writes them.
+    values = [77]
+    for branch in range(4):
+        values += [branch * 100 + field for field in range(26)]
+    values += [1000 + servo for servo in range(20)]
+    values += [2345, 6]
+    bus_stats = headctl.decode_bus_stats(struct.pack(f"<{len(values)}I", *values))
+    assert bus_stats["branches"][2]["overrun"] == 200
+    assert bus_stats["branches"][2]["noise_errors"] == 202
+    assert bus_stats["branches"][2]["requests"] == 205
+    assert bus_stats["branches"][3]["rx_restart_failures"] == 317
+    assert bus_stats["branches"][3]["rx_gaps"] == 318
+    assert bus_stats["branches"][3]["dma_rx_errors"] == 320
+    assert bus_stats["branches"][3]["bad_shifted"] == 323
+    assert bus_stats["missed_replies"][19] == 1019
+    assert bus_stats["window_max_period_us"] == 2345
+    assert bus_stats["control_deadline_misses"] == 6
+    try:
+        headctl.decode_bus_stats(bytes(10))
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("a short BUS_STATS payload was accepted")
+
+    # CONTROL_TIMING: transaction ID, cycle count, last cycle start (u64 us),
+    # schedule restarts, 5 period bins, busy-over-half-period cycles, then the
+    # window maxima, in the order send_control_timing() (src/main.c) writes them.
+    def control_timing(cycles, start_us, restarts, bins, busy_over, maxima):
+        return struct.pack("<IIQI5IIIII", 88, cycles, start_us, restarts, *bins,
+                           busy_over, *maxima)
+    assert len(control_timing(0, 0, 0, [0] * 5, 0, [0] * 3)) == \
+        headctl.CONTROL_TIMING_PAYLOAD_LENGTH
+    timing = headctl.decode_control_timing(
+        control_timing(7, (1 << 33) + 5, 2, [10, 11, 12, 13, 14], 3, [2050, 900, 40]))
+    assert timing["control_cycle_count"] == 7
+    assert timing["last_control_cycle_start_us"] == (1 << 33) + 5
+    assert timing["schedule_restart_count"] == 2
+    assert timing["period_bin_count"] == [10, 11, 12, 13, 14]
+    assert timing["busy_over_half_period_count"] == 3
+    assert timing["window_max_period_us"] == 2050
+    assert timing["window_max_busy_us"] == 900
+    assert timing["window_max_lock_wait_us"] == 40
+    try:
+        headctl.decode_control_timing(bytes(10))
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("a short CONTROL_TIMING payload was accepted")
+
+    # Pass rule: 60 s at exactly 500 Hz with jitter only passes; the cycle
+    # counter may wrap between the two readings.
+    before = headctl.decode_control_timing(
+        control_timing(0xFFFFFF00, 1_000_000, 0, [0, 5, 0, 0, 0], 0, [0] * 3))
+    good = headctl.decode_control_timing(
+        control_timing((0xFFFFFF00 + 30_000) & 0xFFFFFFFF, 61_000_000, 0,
+                       [100, 29_000, 905, 0, 0], 0, [2060, 700, 30]))
+    result = headctl.evaluate_control_timing(before, good, 500)
+    assert result["cycle_count"] == 30_000
+    assert abs(result["rate_hz"] - 500.0) < 1e-9
+    assert result["passed"], result
+    # One lost cycle fails, even with a correct mean rate.
+    lost = headctl.decode_control_timing(
+        control_timing((0xFFFFFF00 + 30_000) & 0xFFFFFFFF, 61_000_000, 1,
+                       [100, 29_000, 904, 0, 1], 0, [4010, 700, 30]))
+    result = headctl.evaluate_control_timing(before, lost, 500)
+    assert not result["checks"]["no_lost_cycle"] and result["checks"]["rate"]
+    # A rate 0.2 % low fails; busy time of half the period fails.
+    slow = headctl.decode_control_timing(
+        control_timing((0xFFFFFF00 + 29_940) & 0xFFFFFFFF, 61_000_000, 0,
+                       [0, 29_945, 0, 0, 0], 0, [2010, 1000, 30]))
+    result = headctl.evaluate_control_timing(before, slow, 500)
+    assert not result["checks"]["rate"] and not result["checks"]["busy"]
+
+    # Port selection: an explicit path passes through unchanged; AUTO_PORT
+    # needs exactly one CDC1 link (interface 02) and never takes the console.
+    assert headctl.resolve_port("/dev/ttyACM7") == "/dev/ttyACM7"
+    default_pattern = headctl.HEAD_PORT_PATTERN
+    with tempfile.TemporaryDirectory() as directory:
+        by_id = Path(directory)
+        headctl.HEAD_PORT_PATTERN = str(by_id / "usb-ZEPHYR_Head*-if02")
+        (by_id / "usb-ZEPHYR_Head_Teensy_Controller_500100DD041F39D7-if00").touch()
+        for expected_count in (0, 2):
+            if expected_count == 2:
+                (by_id / "usb-ZEPHYR_Head_Teensy_Controller_500100DD041F39D7-if02").touch()
+                (by_id / "usb-ZEPHYR_Head_Controller_NO-12V_Bench_00000001-if02").touch()
+            try:
+                headctl.resolve_port(headctl.AUTO_PORT)
+            except OSError:
+                pass
+            else:
+                raise AssertionError(f"AUTO_PORT accepted {expected_count} candidates")
+        (by_id / "usb-ZEPHYR_Head_Controller_NO-12V_Bench_00000001-if02").unlink()
+        assert headctl.resolve_port(headctl.AUTO_PORT) == str(
+            by_id / "usb-ZEPHYR_Head_Teensy_Controller_500100DD041F39D7-if02")
+    headctl.HEAD_PORT_PATTERN = default_pattern
 
 
 if __name__ == "__main__":

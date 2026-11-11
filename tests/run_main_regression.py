@@ -62,10 +62,11 @@ int main(void)
   calibration.joints[0].operating_current_ma = 900;
   calibration.joints[1].operating_current_ma = 900;
   calibration.joints[2].operating_current_ma = 701;
+  /* A configured branch total above 2,500 mA no longer blocks torque-on; only
+   * the measured branch current is supervised (below). */
   begin_preparation_locked(HEAD_ENABLED);
   service_preparation_locked();
-  assert(step_count == 0u && runtime.fault == HEAD_FAULT_BRANCH_CURRENT_BUDGET);
-  assert(runtime.shutdown_requested && !runtime.preparation_active);
+  assert(step_count == 1u && runtime.fault == HEAD_FAULT_NONE);
 
   reset_fixture();
   runtime.state = HEAD_ENABLED;
@@ -87,6 +88,8 @@ int main(void)
   runtime.torque_state = HEAD_TORQUE_ON_VERIFIED;
   runtime.preparation_completed_ms = 90u;
   calibration.active_servo_mask = (1u << 0u) | (1u << 5u);
+  /* The profile, not the ID, puts servo 5 on another branch. */
+  calibration.joints[5].branch_index = 3u;
   runtime.servos[0].last_current_feedback_ms = 100u;
   runtime.servos[0].present_current_ma = 2501;
   service_branch_current_budget_locked(100u);

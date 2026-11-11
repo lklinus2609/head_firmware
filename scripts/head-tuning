@@ -1,0 +1,32 @@
+#!/bin/sh
+# Location-independent launcher for the tuning panel (tuning_gui.py).
+#
+# The panel needs PyQt5 and pyserial. firmware/.venv carries pyserial but not
+# PyQt5; bench/.venv carries both (bench/requirements.txt). Use the first
+# interpreter that can import both.
+set -eu
+
+script_path=$0
+# Follow symlinks so this can be linked into ~/.local/bin.
+while [ -L "$script_path" ]; do
+  link=$(readlink "$script_path")
+  case $link in
+    /*) script_path=$link ;;
+     *) script_path=$(dirname "$script_path")/$link ;;
+  esac
+done
+scripts_dir=$(CDPATH= cd -- "$(dirname -- "$script_path")" && pwd)
+firmware_dir=$(dirname -- "$scripts_dir")
+project_dir=$(dirname -- "$firmware_dir")
+
+panel_py=$firmware_dir/host_ros/src/head_ros/head_ros/tuning_gui.py
+[ -f "$panel_py" ] || { echo "head-tuning: cannot find $panel_py" >&2; exit 1; }
+
+for candidate in "$firmware_dir/.venv/bin/python3" "$project_dir/bench/.venv/bin/python3"; do
+  if [ -x "$candidate" ] && "$candidate" -c "import PyQt5.QtWidgets, serial" 2>/dev/null; then
+    exec "$candidate" "$panel_py" "$@"
+  fi
+done
+echo "head-tuning: no Python with PyQt5 and pyserial found." >&2
+echo "Install bench/requirements.txt into bench/.venv (see bench/README.md)." >&2
+exit 1

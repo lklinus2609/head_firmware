@@ -38,8 +38,8 @@ readback, and removes the ROS action callback's dependency on an asyncio loop.
   paths against firmware.
 - [x] Select an external regulated supply instead of direct 3S LiPo power for
   initial bring-up.
-- [x] Record the sequential branch/ID map and co-actuated groups `{9, 12, 14}`
-  and `{8, 17, 19}`.
+- [x] Record the sequential branch/ID map and co-actuated groups `{8, 11, 14}`
+  (right modiolus) and `{9, 16, 19}` (left modiolus), corrected 2026-10-15.
 - [x] Record the external supply rating: nominal 12 V, approximately 9 A
   maximum, with an adjustable current limit.
 - [ ] Measure its static output and turn-on behavior; the servo rail must not
@@ -133,7 +133,7 @@ servo. Record period/jitter histograms and bus-error counters.
 ## Phase 4 — safe current-threshold homing
 
 1. Extend the calibration profile with a homing batch/conflict identifier.
-   Encode `{9, 12, 14}` and `{8, 17, 19}` as two conflict groups. Default first
+   Encode `{8, 11, 14}` and `{9, 16, 19}` as two conflict groups. Default first
    commissioning to one servo per batch.
 2. Read present position before enabling torque and seed each goal from that
    measurement.

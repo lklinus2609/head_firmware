@@ -11,6 +11,7 @@
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/reboot.h>
 #include <zephyr/random/random.h>
+#include <cmsis_core.h>
 
 #include "board.h"
 #include "config.h"
@@ -27,6 +28,148 @@ static struct head_runtime runtime;
 static const struct device *usb;
 static struct head_frame_parser parser;
 K_MUTEX_DEFINE(head_lock);
+
+/* Black box for unexplained watchdog resets. The only watchdog feed is in the
+ * control thread and runs under head_lock, so a reset means some code kept the
+ * control thread from feeding for the 1 s window. Every head_lock acquisition
+ * records its source line here, and the control thread records its phase and
+ * last feed. The record lives in uncached no-init DTCM so a warm reset may
+ * leave it intact;
+ * main() copies it out before clearing it, and HEAD_MSG_GET_BLACK_BOX reports
+ * the copy. Whether RAM survives this reset is not assumed: the magic and its
+ * complement must both match, otherwise the copy is reported as not kept. */
+#define HEAD_BLACK_BOX_MAGIC 0x424C4B42u /* "BLKB" */
+#define HEAD_BLACK_BOX_TRAIL_COUNT 8u
+enum head_black_box_phase {
+  HEAD_PHASE_IDLE = 0,
+  HEAD_PHASE_LOCKED,
+  HEAD_PHASE_PREPARATION,
+  HEAD_PHASE_TELEMETRY_CONSUME,
+  HEAD_PHASE_HOMING,
+  HEAD_PHASE_CONTROL,
+  HEAD_PHASE_WRITE_TARGETS,
+  HEAD_PHASE_TELEMETRY_START,
+  HEAD_PHASE_SHUTDOWN,
+  HEAD_PHASE_FEED,
+};
+struct head_black_box {
+  uint32_t magic;
+  uint32_t magic_complement;
+  uint32_t boot_count;
+  uint32_t holder_line;       /* main.c line holding head_lock; 0 = free */
+  uint32_t holder_since_ms;
+  uint32_t last_feed_ms;
+  uint32_t control_phase;
+  uint32_t control_phase_ms;
+  uint32_t trail_next;
+  uint32_t trail_line[HEAD_BLACK_BOX_TRAIL_COUNT];
+  uint32_t trail_ms[HEAD_BLACK_BOX_TRAIL_COUNT];
+  /* Written by a 10 ms kernel timer in interrupt context. If it keeps
+   * advancing after the last feed, interrupts were running; if it stops,
+   * interrupts were off. */
+  uint32_t timer_ms;
+  /* What the 10 ms timer interrupt found running: the interrupted thread, its
+   * name, and the PC and LR stacked on its process stack, plus the NVIC
+   * active and pending bits (160 IRQs, 5 words). A thread that never yields
+   * shows here with the address it spins at; an interrupt storm shows as an
+   * active or pending bit. */
+  uint32_t timer_thread;
+  char timer_thread_name[16];
+  uint32_t timer_thread_pc;
+  uint32_t timer_thread_lr;
+  uint32_t timer_nvic_active[5];
+  uint32_t timer_nvic_pending[5];
+  /* Also from that tick: eDMA ES/ERR/INT, the NVIC enable bits (a pending
+   * bit only matters if its IRQ is enabled) and each branch's LPUART STAT. */
+  uint32_t timer_dma_error_status;
+  uint32_t timer_dma_error_channels;
+  uint32_t timer_dma_interrupt_channels;
+  uint32_t timer_nvic_enabled[5];
+  uint32_t timer_uart_status[4];
+  /* head_board_trace counts at the last feed, to show events after it. */
+  uint32_t uart_event_count_at_feed[4][HEAD_BOARD_UART_EVENT_TYPE_COUNT];
+};
+/* DTCM, not .noinit: .noinit is in OCRAM behind the write-back data cache,
+ * and a watchdog reset discards dirty cache lines, which left a stale mix of
+ * values from different moments. Tightly coupled memory bypasses the cache. */
+static __dtcm_noinit_section struct head_black_box black_box;
+static struct head_black_box previous_black_box;
+static struct head_dxl_trace previous_dxl_trace;
+static struct head_board_trace previous_board_trace;
+
+static void black_box_timer_expired(struct k_timer *timer)
+{
+  ARG_UNUSED(timer);
+  black_box.timer_ms = k_uptime_get_32();
+  const k_tid_t thread = k_current_get();
+  black_box.timer_thread = (uint32_t)(uintptr_t)thread;
+  const char *name = k_thread_name_get(thread);
+  strncpy(black_box.timer_thread_name, name != NULL ? name : "",
+          sizeof(black_box.timer_thread_name) - 1u);
+  black_box.timer_thread_name[sizeof(black_box.timer_thread_name) - 1u] = '\0';
+  /* Thread mode runs on the process stack. The hardware stacks R0-R3, R12,
+   * LR, PC and xPSR there on exception entry, so PC is word 6 and LR word 5. */
+  const uint32_t *frame = (const uint32_t *)__get_PSP();
+  black_box.timer_thread_lr = frame[5];
+  black_box.timer_thread_pc = frame[6];
+  for (uint32_t word = 0u; word < 5u; ++word) {
+    black_box.timer_nvic_active[word] = NVIC->IABR[word];
+    black_box.timer_nvic_pending[word] = NVIC->ISPR[word];
+    black_box.timer_nvic_enabled[word] = NVIC->ISER[word];
+  }
+  head_board_dma_error_registers(&black_box.timer_dma_error_status,
+                                 &black_box.timer_dma_error_channels,
+                                 &black_box.timer_dma_interrupt_channels);
+  for (uint8_t branch_index = 0u; branch_index < 4u; ++branch_index) {
+    black_box.timer_uart_status[branch_index] = head_board_branch_uart_status(branch_index);
+  }
+}
+K_TIMER_DEFINE(black_box_timer, black_box_timer_expired, NULL);
+static bool previous_black_box_kept;
+
+/* head_lock is a Zephyr mutex and may nest; the record then names the
+ * innermost holder until it unlocks, which is enough for a diagnostic. */
+static void head_lock_at(uint32_t line)
+{
+  k_mutex_lock(&head_lock, K_FOREVER);
+  const uint32_t now_ms = k_uptime_get_32();
+  black_box.holder_line = line;
+  black_box.holder_since_ms = now_ms;
+  const uint32_t slot = black_box.trail_next % HEAD_BLACK_BOX_TRAIL_COUNT;
+  black_box.trail_line[slot] = line;
+  black_box.trail_ms[slot] = now_ms;
+  black_box.trail_next = slot + 1u;
+}
+
+static void head_unlock(void)
+{
+  black_box.holder_line = 0u;
+  k_mutex_unlock(&head_lock);
+}
+
+static void black_box_phase(enum head_black_box_phase phase)
+{
+  black_box.control_phase = (uint32_t)phase;
+  black_box.control_phase_ms = k_uptime_get_32();
+}
+
+/* Called once from main() before any other thread can take head_lock. */
+static void black_box_boot(void)
+{
+  previous_black_box_kept = black_box.magic == HEAD_BLACK_BOX_MAGIC &&
+                            black_box.magic_complement == ~HEAD_BLACK_BOX_MAGIC;
+  previous_black_box = black_box;
+  previous_dxl_trace = head_dxl_trace;
+  memset(&head_dxl_trace, 0, sizeof(head_dxl_trace));
+  previous_board_trace = head_board_trace;
+  memset(&head_board_trace, 0, sizeof(head_board_trace));
+  const uint32_t boot_count = previous_black_box_kept ? black_box.boot_count + 1u : 1u;
+  memset(&black_box, 0, sizeof(black_box));
+  black_box.magic = HEAD_BLACK_BOX_MAGIC;
+  black_box.magic_complement = ~HEAD_BLACK_BOX_MAGIC;
+  black_box.boot_count = boot_count;
+  k_timer_start(&black_box_timer, K_MSEC(10), K_MSEC(10));
+}
 static uint32_t staged_slots_mask;
 static bool staging_active;
 static struct head_calibration storage_pending_calibration;
@@ -172,7 +315,8 @@ static bool token_matches(const struct head_frame *frame, uint32_t now_ms)
 
 static bool usb_low_priority_type(uint8_t type)
 {
-  return type == HEAD_MSG_STATE || type == HEAD_MSG_DIAGNOSTICS;
+  return type == HEAD_MSG_STATE || type == HEAD_MSG_DIAGNOSTICS ||
+         type == HEAD_MSG_PRESENT_PWM;
 }
 
 static bool usb_send(uint8_t type, const uint8_t *payload, uint16_t length)
@@ -359,7 +503,9 @@ static void send_hello_reply(uint32_t transaction_id)
       HEAD_CAP_BOUNDED_USB_TX | HEAD_CAP_TRANSMITTED_SEQUENCE |
       HEAD_CAP_SINGLE_SERVO_HOMING | HEAD_CAP_PARSER_TIMEOUT |
       HEAD_CAP_TORQUE_READBACK | HEAD_CAP_PROPRIOCEPTION_HOLD |
-      HEAD_CAP_ROUTING_HOLD;
+      HEAD_CAP_ROUTING_HOLD | HEAD_CAP_TUNING | HEAD_CAP_BLACK_BOX | HEAD_CAP_BUS_STATS |
+      HEAD_CAP_ENABLE_AT_PRESENT_POSE | HEAD_CAP_POSITION_RANGE |
+      HEAD_CAP_PRESENT_PWM | HEAD_CAP_CONTROL_TIMING;
 #if defined(CONFIG_NVS)
   capabilities |= HEAD_CAP_CONFIG_AB_STORAGE;
 #endif
@@ -511,8 +657,9 @@ static bool active_feedback_fresh(uint32_t now_ms)
 static uint8_t active_branch_mask(void)
 {
   uint8_t mask = 0u;
+  uint8_t servo_indexes[HEAD_SERVOS_PER_BRANCH];
   for (uint8_t branch_index = 0u; branch_index < HEAD_BRANCH_COUNT; ++branch_index) {
-    if (((calibration.active_servo_mask >> (branch_index * HEAD_SERVOS_PER_BRANCH)) & 0x1Fu) != 0u) {
+    if (head_config_branch_servo_indexes(&calibration, branch_index, servo_indexes) != 0u) {
       mask |= (uint8_t)(1u << branch_index);
     }
   }
@@ -540,16 +687,6 @@ static void begin_preparation_locked(enum head_state target_state)
 static void service_preparation_locked(void)
 {
   const uint32_t started_ms = k_uptime_get_32();
-  /* Branch current is the first motion-preparation safety gate. This check is
-   * independent of config validation so a corrupted in-memory profile cannot
-   * reach the torque-enable sequence. */
-  for (uint8_t branch_index = 0u; branch_index < HEAD_BRANCH_COUNT; ++branch_index) {
-    if (head_config_operating_current_branch_ma(&calibration, branch_index) >
-        HEAD_BRANCH_CURRENT_BUDGET_MA) {
-      head_state_fault(&runtime, HEAD_FAULT_BRANCH_CURRENT_BUDGET);
-      return;
-    }
-  }
   if (head_lease_is_expired(&runtime, started_ms) ||
       started_ms - runtime.preparation_started_ms > 1500u) {
     head_state_fault(&runtime, HEAD_FAULT_WATCHDOG);
@@ -572,6 +709,20 @@ static void service_preparation_locked(void)
     runtime.accepted_sequence_valid = false;
     runtime.pending_transmit_valid = false;
     runtime.watchdog_hold_started_ms = 0u;
+    if (runtime.state == HEAD_TUNING) {
+      /* Preparation just read each present position and wrote it as the
+       * goal, so the goals are the pose the head was in: tuning's neutral. */
+      for (uint8_t index = 0u; index < HEAD_SERVO_COUNT; ++index) {
+        runtime.tuning_neutral_tick[index] = runtime.servos[index].goal_tick;
+      }
+    }
+    if (runtime.state == HEAD_ENABLED &&
+        !head_control_seed_requested_positions(&runtime, &calibration)) {
+      /* A servo moved out of its range after the request was accepted, or
+       * its range is invalid. Holding q there would clamp it to the range end
+       * and move it, so remove torque instead. */
+      head_state_fault(&runtime, HEAD_FAULT_CONFIGURATION);
+    }
   }
 }
 
@@ -588,11 +739,12 @@ static void service_branch_current_budget_locked(uint32_t now_ms)
   for (uint8_t branch_index = 0u; branch_index < HEAD_BRANCH_COUNT;
        ++branch_index) {
     bool branch_current_feedback_fresh = true;
-    const uint8_t first_servo = branch_index * HEAD_SERVOS_PER_BRANCH;
-    const uint8_t end_servo = first_servo + HEAD_SERVOS_PER_BRANCH;
-    for (uint8_t index = first_servo; index < end_servo; ++index) {
-      if ((calibration.active_servo_mask & (1u << index)) == 0u) continue;
-      const uint32_t feedback_ms = runtime.servos[index].last_current_feedback_ms;
+    uint8_t servo_indexes[HEAD_SERVOS_PER_BRANCH];
+    const uint8_t servo_count =
+        head_config_branch_servo_indexes(&calibration, branch_index, servo_indexes);
+    for (uint8_t member = 0u; member < servo_count; ++member) {
+      const uint32_t feedback_ms =
+          runtime.servos[servo_indexes[member]].last_current_feedback_ms;
       if (feedback_ms == 0u || now_ms - feedback_ms > 30u ||
           (int32_t)(feedback_ms - runtime.preparation_completed_ms) < 0) {
         branch_current_feedback_fresh = false;
@@ -646,10 +798,13 @@ static int service_shutdown_locked(uint32_t now_ms)
 static void send_state(void)
 {
   uint8_t payload[512];
+  /* MCU timestamp (same as STATE's) + one i16 per servo. */
+  uint8_t pwm_payload[4u + 2u * HEAD_SERVO_COUNT];
   size_t byte_offset = 0u;
+  size_t pwm_byte_offset = 0u;
   uint32_t now;
 
-  k_mutex_lock(&head_lock, K_FOREVER);
+  head_lock_at(__LINE__);
   now = k_uptime_get_32();
   payload[byte_offset++] = (uint8_t)runtime.state;
   payload[byte_offset++] = (uint8_t)runtime.fault;
@@ -665,12 +820,15 @@ static void send_state(void)
   payload[byte_offset++] = (uint8_t)runtime.torque_state;
   payload[byte_offset++] = runtime.shutdown_confirmations;
   payload[byte_offset++] = runtime.shutdown_requested ? 1u : 0u;
-  payload[byte_offset++] = 0u;
+  /* Formerly a reserved zero byte; the payload length is unchanged. */
+  payload[byte_offset++] = runtime.position_range_generation;
   put_u32(payload, &byte_offset, runtime.shutdown_attempts);
   put_u32(payload, &byte_offset, runtime.shutdown_failures);
   put_u32(payload, &byte_offset, boot_session_id);
+  put_u32(pwm_payload, &pwm_byte_offset, now);
   for (uint8_t servo_index = 0; servo_index < HEAD_SERVO_COUNT; ++servo_index) {
     const struct head_servo_state *servo = &runtime.servos[servo_index];
+    put_u16(pwm_payload, &pwm_byte_offset, (uint16_t)servo->present_pwm_raw);
     put_u32(payload, &byte_offset, (uint32_t)servo->goal_tick);
     put_u32(payload, &byte_offset, (uint32_t)servo->present_tick);
     put_u32(payload, &byte_offset, (uint32_t)servo->present_velocity_raw);
@@ -683,8 +841,9 @@ static void send_state(void)
     put_u32(payload, &byte_offset, servo->last_feedback_ms == 0u ? UINT32_MAX :
                             now - servo->last_feedback_ms);
   }
-  k_mutex_unlock(&head_lock);
+  head_unlock();
   usb_send(HEAD_MSG_STATE, payload, (uint16_t)byte_offset);
+  usb_send(HEAD_MSG_PRESENT_PWM, pwm_payload, (uint16_t)pwm_byte_offset);
 }
 
 static void send_diagnostics(void)
@@ -692,7 +851,7 @@ static void send_diagnostics(void)
   uint8_t payload[224];
   size_t byte_offset = 0u;
 
-  k_mutex_lock(&head_lock, K_FOREVER);
+  head_lock_at(__LINE__);
   payload[byte_offset++] = (uint8_t)runtime.state;
   payload[byte_offset++] = (uint8_t)runtime.fault;
   put_u32(payload, &byte_offset, runtime.control_deadline_misses);
@@ -721,7 +880,9 @@ static void send_diagnostics(void)
    * bus loss rate the retries absorb stays observable without changing the
    * fixed diagnostics payload length. */
   put_u16(payload, &byte_offset, head_dxl_read_retry_count());
-  payload[byte_offset++] = 0u;
+  /* The third one: the last preparation step that failed for good,
+   * (phase << 5) | servo index (2026-11-10, BUS faults at Enable). */
+  payload[byte_offset++] = head_dxl_last_preparation_failure();
   put_u32(payload, &byte_offset, (uint32_t)runtime.storage_result);
   put_u32(payload, &byte_offset, head_config_generation());
   put_u32(payload, &byte_offset, boot_reset_cause);
@@ -734,7 +895,7 @@ static void send_diagnostics(void)
   head_dxl_last_transaction_error(&failed_address, &failed_status);
   put_u16(payload, &byte_offset, failed_address);
   payload[byte_offset++] = failed_status;
-  k_mutex_unlock(&head_lock);
+  head_unlock();
   usb_send(HEAD_MSG_DIAGNOSTICS, payload, (uint16_t)byte_offset);
 }
 
@@ -796,6 +957,225 @@ static bool probe_baud_supported(uint32_t baudrate)
          baudrate == 2000000u || baudrate == 3000000u || baudrate == 4000000u;
 }
 
+/* Longest control-thread period since the last GET_BUS_STATS. The since-boot
+ * maximum in DIAGNOSTICS includes boot discovery, so it cannot show the cost
+ * of normal running. Written by the control thread under head_lock. */
+static uint32_t bus_stats_window_max_period_us;
+
+/* Layout: transaction ID, then per branch the counts in the order of the
+ * values[] list below (docs/API.md), then one missed-reply count per servo,
+ * then the control period maximum since the previous request and the total
+ * deadline misses. */
+#define HEAD_BUS_STATS_BRANCH_VALUE_COUNT 26u
+static void send_bus_stats(uint32_t transaction_id)
+{
+  uint8_t payload[4u + HEAD_BRANCH_COUNT * HEAD_BUS_STATS_BRANCH_VALUE_COUNT * 4u +
+                  HEAD_SERVO_COUNT * 4u + 2u * 4u];
+  size_t byte_offset = 0u;
+  put_u32(payload, &byte_offset, transaction_id);
+  for (uint8_t branch_index = 0u; branch_index < HEAD_BRANCH_COUNT; ++branch_index) {
+    struct head_board_error_counts board_counts;
+    struct head_dxl_bus_stats dxl_stats;
+    head_board_branch_error_counts(branch_index, &board_counts);
+    head_dxl_bus_stats(branch_index, &dxl_stats);
+    const uint32_t values[] = {
+      board_counts.overrun_count, board_counts.framing_error_count,
+      board_counts.noise_error_count, board_counts.ring_overflow_count,
+      board_counts.dma_starvation_count,
+      dxl_stats.request_count, dxl_stats.complete_count,
+      dxl_stats.silent_timeout_count, dxl_stats.partial_timeout_count,
+      dxl_stats.received_byte_count, dxl_stats.drained_byte_count,
+      dxl_stats.resync_byte_count, dxl_stats.bad_length_count,
+      dxl_stats.bad_packet_count, dxl_stats.unknown_id_count,
+      dxl_stats.servo_error_count, dxl_stats.write_failure_count,
+      dxl_stats.rx_restart_failure_count,
+      board_counts.rx_gap_count, board_counts.rx_overlap_count,
+      board_counts.dma_rx_error_count, board_counts.dma_tx_error_count,
+      dxl_stats.bad_in_place_count, dxl_stats.bad_shifted_count,
+      board_counts.dma_halt_sample_count, board_counts.dma_rx_last_error_status,
+    };
+    BUILD_ASSERT(ARRAY_SIZE(values) == HEAD_BUS_STATS_BRANCH_VALUE_COUNT, "bus-stats layout");
+    for (size_t value_index = 0u; value_index < ARRAY_SIZE(values); ++value_index) {
+      put_u32(payload, &byte_offset, values[value_index]);
+    }
+  }
+  for (uint8_t servo_index = 0u; servo_index < HEAD_SERVO_COUNT; ++servo_index) {
+    put_u32(payload, &byte_offset, head_dxl_missed_reply_count(servo_index));
+  }
+  put_u32(payload, &byte_offset, bus_stats_window_max_period_us);
+  put_u32(payload, &byte_offset, runtime.control_deadline_misses);
+  bus_stats_window_max_period_us = 0u;
+  usb_send(HEAD_MSG_BUS_STATS, payload, (uint16_t)byte_offset);
+}
+
+/* Control-loop timing for GET_CONTROL_TIMING. control_deadline_misses counts
+ * any period over 2000 us, so ordinary wake jitter reads as a miss and the
+ * mean rate cannot be derived from it. These counts give the rate (cycles over
+ * start time) and separate jitter from lost cycles. Counts are since boot; the
+ * window maxima restart at every GET_CONTROL_TIMING. Only the cooperative
+ * control thread writes them, under head_lock except schedule_restart_count. */
+#define HEAD_CONTROL_PERIOD_BIN_COUNT 5u
+/* Bin upper edges; the last bin is everything from 4000 us up. */
+static const uint32_t control_period_bin_upper_us[HEAD_CONTROL_PERIOD_BIN_COUNT - 1u] = {
+  1900u, 2100u, 2500u, 4000u,
+};
+static struct {
+  uint32_t control_cycle_count;
+  uint64_t last_control_cycle_start_us;
+  /* Cycles that ended after the next deadline, so that slot was lost and the
+   * schedule restarted from the present time. Homing reconfiguration is not
+   * counted: its register readback is meant to exceed a cycle. */
+  uint32_t schedule_restart_count;
+  uint32_t period_bin_count[HEAD_CONTROL_PERIOD_BIN_COUNT];
+  /* Cycles whose locked section took half the period or more. */
+  uint32_t busy_over_half_period_count;
+  uint32_t window_max_period_us;
+  uint32_t window_max_busy_us;
+  uint32_t window_max_lock_wait_us;
+} control_timing;
+
+static void record_control_period(uint32_t control_period_us)
+{
+  uint8_t bin_index = 0u;
+  while (bin_index < HEAD_CONTROL_PERIOD_BIN_COUNT - 1u &&
+         control_period_us >= control_period_bin_upper_us[bin_index]) {
+    ++bin_index;
+  }
+  ++control_timing.period_bin_count[bin_index];
+  if (control_period_us > control_timing.window_max_period_us) {
+    control_timing.window_max_period_us = control_period_us;
+  }
+}
+
+/* Layout: transaction ID, cycle count, last cycle start (u64 us, low word
+ * first), schedule restarts, the period bins, busy-over-half-period cycles,
+ * then the window maxima of period, busy time and lock wait (docs/API.md). */
+static void send_control_timing(uint32_t transaction_id)
+{
+  uint8_t payload[4u + 4u + 8u + 4u + HEAD_CONTROL_PERIOD_BIN_COUNT * 4u + 4u + 3u * 4u];
+  size_t byte_offset = 0u;
+  put_u32(payload, &byte_offset, transaction_id);
+  put_u32(payload, &byte_offset, control_timing.control_cycle_count);
+  put_u32(payload, &byte_offset, (uint32_t)control_timing.last_control_cycle_start_us);
+  put_u32(payload, &byte_offset, (uint32_t)(control_timing.last_control_cycle_start_us >> 32u));
+  put_u32(payload, &byte_offset, control_timing.schedule_restart_count);
+  for (uint8_t bin_index = 0u; bin_index < HEAD_CONTROL_PERIOD_BIN_COUNT; ++bin_index) {
+    put_u32(payload, &byte_offset, control_timing.period_bin_count[bin_index]);
+  }
+  put_u32(payload, &byte_offset, control_timing.busy_over_half_period_count);
+  put_u32(payload, &byte_offset, control_timing.window_max_period_us);
+  put_u32(payload, &byte_offset, control_timing.window_max_busy_us);
+  put_u32(payload, &byte_offset, control_timing.window_max_lock_wait_us);
+  control_timing.window_max_period_us = 0u;
+  control_timing.window_max_busy_us = 0u;
+  control_timing.window_max_lock_wait_us = 0u;
+  usb_send(HEAD_MSG_CONTROL_TIMING, payload, (uint16_t)byte_offset);
+}
+
+static void send_black_box(uint32_t transaction_id)
+{
+  uint8_t payload[4u + 1u + 4u + 4u + 5u * 4u + HEAD_BLACK_BOX_TRAIL_COUNT * 8u + 4u * 4u +
+                  4u + 4u * (2u * HEAD_BOARD_UART_EVENT_TYPE_COUNT + 1u) * 4u +
+                  4u + 16u + 4u + 4u + 5u * 4u + 5u * 4u + 4u * 4u +
+                  3u * 4u + 5u * 4u + 4u * 4u];
+  size_t byte_offset = 0u;
+  put_u32(payload, &byte_offset, transaction_id);
+  payload[byte_offset++] = previous_black_box_kept ? 1u : 0u;
+  put_u32(payload, &byte_offset, black_box.boot_count);
+  put_u32(payload, &byte_offset, boot_reset_cause);
+  put_u32(payload, &byte_offset, previous_black_box.holder_line);
+  put_u32(payload, &byte_offset, previous_black_box.holder_since_ms);
+  put_u32(payload, &byte_offset, previous_black_box.last_feed_ms);
+  put_u32(payload, &byte_offset, previous_black_box.control_phase);
+  put_u32(payload, &byte_offset, previous_black_box.control_phase_ms);
+  /* Oldest first. */
+  for (uint32_t step = 0u; step < HEAD_BLACK_BOX_TRAIL_COUNT; ++step) {
+    const uint32_t slot = (previous_black_box.trail_next + step) % HEAD_BLACK_BOX_TRAIL_COUNT;
+    put_u32(payload, &byte_offset, previous_black_box.trail_line[slot]);
+    put_u32(payload, &byte_offset, previous_black_box.trail_ms[slot]);
+  }
+  put_u32(payload, &byte_offset, previous_dxl_trace.point);
+  put_u32(payload, &byte_offset, previous_dxl_trace.branch_index);
+  put_u32(payload, &byte_offset, previous_dxl_trace.drain_count);
+  put_u32(payload, &byte_offset, previous_dxl_trace.point_ms);
+  put_u32(payload, &byte_offset, previous_black_box.timer_ms);
+  for (uint8_t branch_index = 0u; branch_index < 4u; ++branch_index) {
+    for (uint32_t type = 0u; type < HEAD_BOARD_UART_EVENT_TYPE_COUNT; ++type) {
+      put_u32(payload, &byte_offset, previous_board_trace.uart_event_count[branch_index][type]);
+    }
+    for (uint32_t type = 0u; type < HEAD_BOARD_UART_EVENT_TYPE_COUNT; ++type) {
+      put_u32(payload, &byte_offset,
+              previous_black_box.uart_event_count_at_feed[branch_index][type]);
+    }
+    put_u32(payload, &byte_offset, previous_board_trace.uart_last_event_ms[branch_index]);
+  }
+  put_u32(payload, &byte_offset, previous_black_box.timer_thread);
+  memcpy(&payload[byte_offset], previous_black_box.timer_thread_name, 16u);
+  byte_offset += 16u;
+  put_u32(payload, &byte_offset, previous_black_box.timer_thread_pc);
+  put_u32(payload, &byte_offset, previous_black_box.timer_thread_lr);
+  for (uint32_t word = 0u; word < 5u; ++word) {
+    put_u32(payload, &byte_offset, previous_black_box.timer_nvic_active[word]);
+  }
+  for (uint32_t word = 0u; word < 5u; ++word) {
+    put_u32(payload, &byte_offset, previous_black_box.timer_nvic_pending[word]);
+  }
+  put_u32(payload, &byte_offset, previous_dxl_trace.consume_used);
+  put_u32(payload, &byte_offset, previous_dxl_trace.consume_loops);
+  put_u32(payload, &byte_offset, previous_dxl_trace.bad_used_count);
+  put_u32(payload, &byte_offset, previous_dxl_trace.bad_used_value);
+  put_u32(payload, &byte_offset, previous_black_box.timer_dma_error_status);
+  put_u32(payload, &byte_offset, previous_black_box.timer_dma_error_channels);
+  put_u32(payload, &byte_offset, previous_black_box.timer_dma_interrupt_channels);
+  for (uint32_t word = 0u; word < 5u; ++word) {
+    put_u32(payload, &byte_offset, previous_black_box.timer_nvic_enabled[word]);
+  }
+  for (uint8_t branch_index = 0u; branch_index < 4u; ++branch_index) {
+    put_u32(payload, &byte_offset, previous_black_box.timer_uart_status[branch_index]);
+  }
+  usb_send(HEAD_MSG_BLACK_BOX, payload, (uint16_t)byte_offset);
+}
+
+/* Payload: transaction ID, range generation (the STATE byte it matches),
+ * three reserved zero bytes, valid mask (active servos whose range is usable),
+ * homed mask (servos using a homing reference rather than the profile range),
+ * then for every servo slot the ticks that q = 0 and q = 1 map to (i32 each,
+ * zero when not valid). Called with head_lock held, so the generation and the
+ * ranges are from the same instant. */
+static void send_position_range(uint32_t transaction_id)
+{
+  uint8_t payload[4u + 4u + 4u + 4u + HEAD_SERVO_COUNT * 8u];
+  size_t byte_offset = 0u;
+  uint32_t valid_mask = 0u;
+  uint32_t homed_mask = 0u;
+  int32_t minimum_tick[HEAD_SERVO_COUNT] = {0};
+  int32_t maximum_tick[HEAD_SERVO_COUNT] = {0};
+
+  for (uint8_t index = 0u; index < HEAD_SERVO_COUNT; ++index) {
+    if ((calibration.active_servo_mask & (1u << index)) == 0u) continue;
+    if (runtime.homing_reference_valid[index]) homed_mask |= 1u << index;
+    if (head_control_position_range(&runtime, &calibration, index,
+                                    &minimum_tick[index], &maximum_tick[index])) {
+      valid_mask |= 1u << index;
+    } else {
+      minimum_tick[index] = 0;
+      maximum_tick[index] = 0;
+    }
+  }
+  put_u32(payload, &byte_offset, transaction_id);
+  payload[byte_offset++] = runtime.position_range_generation;
+  payload[byte_offset++] = 0u;
+  payload[byte_offset++] = 0u;
+  payload[byte_offset++] = 0u;
+  put_u32(payload, &byte_offset, valid_mask);
+  put_u32(payload, &byte_offset, homed_mask);
+  for (uint8_t index = 0u; index < HEAD_SERVO_COUNT; ++index) {
+    put_u32(payload, &byte_offset, (uint32_t)minimum_tick[index]);
+    put_u32(payload, &byte_offset, (uint32_t)maximum_tick[index]);
+  }
+  usb_send(HEAD_MSG_POSITION_RANGE, payload, (uint16_t)byte_offset);
+}
+
 static void dispatch_frame(const struct head_frame *frame)
 {
   struct head_command command;
@@ -813,7 +1193,7 @@ static void dispatch_frame(const struct head_frame *frame)
         &frame->payload[frame->length - sizeof(transaction_id)]);
   }
 
-  k_mutex_lock(&head_lock, K_FOREVER);
+  head_lock_at(__LINE__);
   if (atomic_get(&boot_complete) == 0 && frame->type != HEAD_MSG_HELLO) {
     result = -EAGAIN;
   } else switch (frame->type) {
@@ -899,6 +1279,22 @@ static void dispatch_frame(const struct head_frame *frame)
       result = 0;
     }
     break;
+  case HEAD_MSG_ENABLE_AT_PRESENT_POSE:
+    /* Payload: lease token, transaction ID. The ACK result is -ERANGE when an
+     * active servo is outside its profile range. */
+    if (frame->length == 8u && token_matches(frame, now) &&
+        runtime.torque_state == HEAD_TORQUE_OFF_VERIFIED &&
+        active_feedback_fresh(now)) {
+      result = head_state_request_enable_at_present_pose(&runtime, &calibration);
+      if (result == 0) begin_preparation_locked(HEAD_ENABLED);
+    }
+    break;
+  case HEAD_MSG_GET_POSITION_RANGE:
+    if (frame->length == 4u) {
+      send_position_range(transaction_id);
+      result = 0;
+    } else result = -EINVAL;
+    break;
   case HEAD_MSG_START_PROPRIOCEPTION:
     if (frame->length == 8u && token_matches(frame, now) &&
         runtime.state == HEAD_READY &&
@@ -933,6 +1329,45 @@ static void dispatch_frame(const struct head_frame *frame)
       } else {
         result = -ERANGE;
       }
+    }
+    break;
+  case HEAD_MSG_GET_BLACK_BOX:
+    if (frame->length == 4u) {
+      send_black_box(transaction_id);
+      result = 0;
+    } else result = -EINVAL;
+    break;
+  case HEAD_MSG_GET_BUS_STATS:
+    if (frame->length == 4u) {
+      send_bus_stats(transaction_id);
+      result = 0;
+    } else result = -EINVAL;
+    break;
+  case HEAD_MSG_GET_CONTROL_TIMING:
+    if (frame->length == 4u) {
+      send_control_timing(transaction_id);
+      result = 0;
+    } else result = -EINVAL;
+    break;
+  case HEAD_MSG_START_TUNING:
+    /* Payload: lease token, u16 Goal Current limit in mA, transaction ID. */
+    if (frame->length == 10u && token_matches(frame, now) &&
+        runtime.torque_state == HEAD_TORQUE_OFF_VERIFIED &&
+        active_feedback_fresh(now) &&
+        head_state_request_tuning(&runtime, &calibration,
+                                  get_u16_le(&frame->payload[4]))) {
+      begin_preparation_locked(HEAD_TUNING);
+      result = 0;
+    }
+    break;
+  case HEAD_MSG_TUNING_STEP:
+    /* Payload: lease token, servo index, signed step in ticks (1 to
+     * HEAD_TUNING_MAX_STEP_TICKS either way), transaction ID. A refused step
+     * reports why in the ACK result. */
+    if (frame->length == 10u && token_matches(frame, now)) {
+      result = head_state_tuning_step(&runtime, &calibration, frame->payload[4],
+                                      (int8_t)frame->payload[5], now);
+      if (result == 0) head_lease_renew(&runtime, now);
     }
     break;
   case HEAD_MSG_DISABLE:
@@ -1185,7 +1620,7 @@ static void dispatch_frame(const struct head_frame *frame)
     break;
   }
   const uint32_t ack_lease_token = runtime.active_lease_token;
-  k_mutex_unlock(&head_lock);
+  head_unlock();
   if (frame->type != HEAD_MSG_JOINT_TARGETS && !defer_ack) {
     send_ack(frame->type, (int8_t)result, ack_lease_token, transaction_id);
   }
@@ -1203,13 +1638,13 @@ static void diagnostic_thread(void *first, void *second, void *third)
     uint32_t received_bytes = 0u;
     uint32_t error_flags = 0u;
     int result = 0;
-    k_mutex_lock(&head_lock, K_FOREVER);
+    head_lock_at(__LINE__);
     if (request.message_type == HEAD_MSG_UART_TX_METER_TEST) {
       result = head_board_branch_set_baud(request.branch_index, 1000000u);
     }
-    k_mutex_unlock(&head_lock);
+    head_unlock();
     do {
-      k_mutex_lock(&head_lock, K_FOREVER);
+      head_lock_at(__LINE__);
       if (runtime.diagnostic_cancel_requested || runtime.shutdown_requested ||
           runtime.torque_state != HEAD_TORQUE_OFF_VERIFIED) {
         result = -ECANCELED;
@@ -1222,18 +1657,18 @@ static void diagnostic_thread(void *first, void *second, void *third)
         received_bytes += head_board_branch_read_available(request.branch_index, incoming, sizeof(incoming));
         error_flags |= head_board_branch_error_flags(request.branch_index);
       }
-      k_mutex_unlock(&head_lock);
+      head_unlock();
       if (result != 0 || (request.message_type == HEAD_MSG_LINE_MODE_TEST &&
                           request.transmit_enabled == 0u)) break;
       k_sleep(K_MSEC(1));
     } while ((int32_t)(k_uptime_get_32() - deadline_ms) < 0);
-    k_mutex_lock(&head_lock, K_FOREVER);
+    head_lock_at(__LINE__);
     if (head_board_branch_set_tx(request.branch_index, false) != 0) result = -EIO;
     if (request.message_type == HEAD_MSG_UART_TX_METER_TEST &&
         head_board_branch_set_baud(request.branch_index, HEAD_BRANCH_DEFAULT_BAUD) != 0) result = -EIO;
     runtime.diagnostic_active = false;
     const uint32_t lease_token = runtime.active_lease_token;
-    k_mutex_unlock(&head_lock);
+    head_unlock();
     if (result == 0 && request.message_type == HEAD_MSG_UART_RX_LINE_TEST) {
       send_rx_line_test_result(request.branch_index, received_bytes, error_flags);
     }
@@ -1250,13 +1685,25 @@ static void control_thread(void *a, void *b, void *c)
   while (true) {
     bool homing_reconfigured = false;
     next_tick += period_ticks;
-    k_mutex_lock(&head_lock, K_FOREVER);
+    const uint64_t wake_cycle = k_cycle_get_64();
+    head_lock_at(__LINE__);
+    black_box_phase(HEAD_PHASE_LOCKED);
     const bool maintenance_was_running = runtime.state == HEAD_MAINTENANCE_CALIBRATION;
     const uint32_t now = k_uptime_get_32();
     const uint64_t cycle = k_cycle_get_64();
+    const uint32_t lock_wait_us = (uint32_t)k_cyc_to_us_floor64(cycle - wake_cycle);
+    if (lock_wait_us > control_timing.window_max_lock_wait_us) {
+      control_timing.window_max_lock_wait_us = lock_wait_us;
+    }
+    ++control_timing.control_cycle_count;
+    control_timing.last_control_cycle_start_us = k_cyc_to_us_floor64(cycle);
     uint32_t control_period_us = 0u;
     if (last_cycle != 0u) {
       control_period_us = (uint32_t)k_cyc_to_us_floor64(cycle - last_cycle);
+      record_control_period(control_period_us);
+      if (control_period_us > bus_stats_window_max_period_us) {
+        bus_stats_window_max_period_us = control_period_us;
+      }
       if (control_period_us > runtime.control_max_period_us) {
         runtime.control_max_period_us = control_period_us;
       }
@@ -1277,6 +1724,7 @@ static void control_thread(void *a, void *b, void *c)
     runtime.last_control_cycle_ms = now;
     if (runtime.preparation_active) {
       if (control_period_us > 20000u) head_state_fault(&runtime, HEAD_FAULT_CONTROL_DEADLINE);
+      black_box_phase(HEAD_PHASE_PREPARATION);
       if (runtime.preparation_active) service_preparation_locked();
       homing_reconfigured = !runtime.preparation_active;
       goto supervise_control;
@@ -1289,11 +1737,13 @@ static void control_thread(void *a, void *b, void *c)
         runtime.state == HEAD_ENABLED ||
         runtime.state == HEAD_PROPRIOCEPTION_SETTLING ||
         runtime.state == HEAD_PROPRIOCEPTION_HOLD ||
-        runtime.state == HEAD_ROUTING)) {
+        runtime.state == HEAD_ROUTING || runtime.state == HEAD_TUNING)) {
       /* Consume responses before control writes. Starting the next telemetry
        * round happens below, after all branch writes have completed. */
+      black_box_phase(HEAD_PHASE_TELEMETRY_CONSUME);
       head_dxl_telemetry_tick(&runtime, &calibration, now, false);
     }
+    black_box_phase(HEAD_PHASE_HOMING);
     head_state_homing_tick(&runtime, &calibration, now);
     head_state_proprioception_tick(&runtime, now);
     if ((runtime.state == HEAD_HOMING ||
@@ -1312,12 +1762,13 @@ static void control_thread(void *a, void *b, void *c)
         queue_storage_locked(&calibration, false) != 0) {
       head_state_fault(&runtime, HEAD_FAULT_CONFIGURATION);
     }
+    black_box_phase(HEAD_PHASE_CONTROL);
     head_control_tick(&runtime, &calibration, now);
     if (head_state_torque_verified_on(&runtime) && (runtime.state == HEAD_HOMING ||
         runtime.state == HEAD_MAINTENANCE_CALIBRATION || runtime.state == HEAD_ENABLED ||
         runtime.state == HEAD_PROPRIOCEPTION_SETTLING ||
         runtime.state == HEAD_PROPRIOCEPTION_HOLD ||
-        runtime.state == HEAD_ROUTING)) {
+        runtime.state == HEAD_ROUTING || runtime.state == HEAD_TUNING)) {
       uint8_t written_branch_mask = 0u;
       if (runtime.state == HEAD_ENABLED && runtime.accepted_sequence_valid &&
           (!runtime.pending_transmit_valid ||
@@ -1326,6 +1777,7 @@ static void control_thread(void *a, void *b, void *c)
         runtime.pending_transmit_branch_mask = active_branch_mask();
         runtime.pending_transmit_valid = true;
       }
+      black_box_phase(HEAD_PHASE_WRITE_TARGETS);
       if (head_dxl_write_targets(&runtime, &calibration, &written_branch_mask) != 0) {
         head_state_fault(&runtime, HEAD_FAULT_BUS);
       } else if (runtime.pending_transmit_valid) {
@@ -1341,11 +1793,14 @@ static void control_thread(void *a, void *b, void *c)
         runtime.state == HEAD_ENABLED ||
         runtime.state == HEAD_PROPRIOCEPTION_SETTLING ||
         runtime.state == HEAD_PROPRIOCEPTION_HOLD ||
-        runtime.state == HEAD_ROUTING) {
+        runtime.state == HEAD_ROUTING || runtime.state == HEAD_TUNING) {
+      black_box_phase(HEAD_PHASE_TELEMETRY_START);
       head_dxl_telemetry_tick(&runtime, &calibration, k_uptime_get_32(), true);
     }
 supervise_control:
+    black_box_phase(HEAD_PHASE_SHUTDOWN);
     (void)service_shutdown_locked(k_uptime_get_32());
+    black_box_phase(HEAD_PHASE_FEED);
 #if defined(CONFIG_WATCHDOG)
     if (hardware_watchdog_channel >= 0 &&
         wdt_feed(hardware_watchdog, hardware_watchdog_channel) != 0) {
@@ -1353,14 +1808,24 @@ supervise_control:
       hardware_watchdog_channel = -1;
     }
 #endif
-    k_mutex_unlock(&head_lock);
+    black_box.last_feed_ms = k_uptime_get_32();
+    memcpy(black_box.uart_event_count_at_feed, head_board_trace.uart_event_count,
+           sizeof(black_box.uart_event_count_at_feed));
+    black_box_phase(HEAD_PHASE_IDLE);
+    const uint32_t busy_us = (uint32_t)k_cyc_to_us_floor64(k_cycle_get_64() - cycle);
+    if (busy_us > control_timing.window_max_busy_us) control_timing.window_max_busy_us = busy_us;
+    if (busy_us >= HEAD_CONTROL_PERIOD_US / 2u) ++control_timing.busy_over_half_period_count;
+    head_unlock();
     if (homing_reconfigured) {
       /* Register readback intentionally exceeds a normal 2 ms cycle. Do not
        * report that commissioning operation as an execution deadline miss. */
       last_cycle = 0u;
       next_tick = k_uptime_ticks();
     }
-    if (next_tick < k_uptime_ticks()) next_tick = k_uptime_ticks() + period_ticks;
+    if (next_tick < k_uptime_ticks()) {
+      if (!homing_reconfigured) ++control_timing.schedule_restart_count;
+      next_tick = k_uptime_ticks() + period_ticks;
+    }
     k_sleep(K_TIMEOUT_ABS_TICKS(next_tick));
   }
 }
@@ -1370,13 +1835,13 @@ static void telemetry_thread(void *a, void *b, void *c)
   ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
   uint32_t last_fan_ms = 0u;
   while (true) {
-    k_mutex_lock(&head_lock, K_FOREVER);
+    head_lock_at(__LINE__);
     if (runtime.state == HEAD_HOMING_REQUIRED || runtime.state == HEAD_HOMING ||
         runtime.state == HEAD_MAINTENANCE_CALIBRATION ||
         runtime.state == HEAD_READY || runtime.state == HEAD_ENABLED ||
         runtime.state == HEAD_PROPRIOCEPTION_SETTLING ||
         runtime.state == HEAD_PROPRIOCEPTION_HOLD ||
-        runtime.state == HEAD_ROUTING) {
+        runtime.state == HEAD_ROUTING || runtime.state == HEAD_TUNING) {
       const uint32_t now = k_uptime_get_32();
       service_branch_current_budget_locked(now);
       if (!runtime.shutdown_requested && !runtime.preparation_active &&
@@ -1417,7 +1882,7 @@ static void telemetry_thread(void *a, void *b, void *c)
 #endif
       last_fan_ms = now;
     }
-    k_mutex_unlock(&head_lock);
+    head_unlock();
     k_sleep(K_MSEC(1));
   }
 }
@@ -1436,9 +1901,9 @@ static int discover_inventory_locked(void)
     const uint32_t started_ms = k_uptime_get_32();
     result = head_dxl_discover_one(&runtime, &calibration, servo_index);
     if (k_uptime_get_32() - started_ms > 500u) result = -ETIMEDOUT;
-    k_mutex_unlock(&head_lock);
+    head_unlock();
     k_sleep(K_MSEC(1));
-    k_mutex_lock(&head_lock, K_FOREVER);
+    head_lock_at(__LINE__);
   }
   if (runtime.shutdown_requested) result = -ECANCELED;
   runtime.discovery_active = false;
@@ -1451,7 +1916,7 @@ static void discovery_thread(void *first, void *second, void *third)
   ARG_UNUSED(first); ARG_UNUSED(second); ARG_UNUSED(third);
   while (true) {
     k_sem_take(&discovery_pending_sem, K_FOREVER);
-    k_mutex_lock(&head_lock, K_FOREVER);
+    head_lock_at(__LINE__);
     const int result = discover_inventory_locked();
     if (result == 0) {
       runtime.fault = HEAD_FAULT_NONE;
@@ -1465,7 +1930,7 @@ static void discovery_thread(void *first, void *second, void *third)
     }
     const uint32_t lease_token = runtime.active_lease_token;
     const uint32_t transaction_id = discovery_transaction_id;
-    k_mutex_unlock(&head_lock);
+    head_unlock();
     send_ack(HEAD_MSG_CLEAR_FAULT, (int8_t)result, lease_token, transaction_id);
   }
 }
@@ -1480,7 +1945,7 @@ static void storage_thread(void *a, void *b, void *c)
   while (true) {
     k_sem_take(&storage_pending_sem, K_FOREVER);
     while (true) {
-      k_mutex_lock(&head_lock, K_FOREVER);
+      head_lock_at(__LINE__);
       /* HEAD_TORQUE_OFF_VERIFIED is only reached through a successful
        * discovery, and discovery needs a committed profile -- so a board whose
        * stored calibration is absent or no longer matches the hardware can
@@ -1498,13 +1963,13 @@ static void storage_thread(void *a, void *b, void *c)
                           never_energized) &&
                          (!runtime.shutdown_requested || never_energized);
       if (ready) runtime.storage_state = HEAD_STORAGE_WRITING;
-      k_mutex_unlock(&head_lock);
+      head_unlock();
       if (ready) break;
       k_sleep(K_MSEC(10));
     }
 
     const int save_result = head_config_save(&storage_pending_calibration);
-    k_mutex_lock(&head_lock, K_FOREVER);
+    head_lock_at(__LINE__);
     runtime.storage_result = save_result;
     if (save_result != 0) {
       runtime.storage_state = HEAD_STORAGE_FAILED;
@@ -1529,7 +1994,7 @@ static void storage_thread(void *a, void *b, void *c)
         head_state_fault(&runtime, HEAD_FAULT_DISCOVERY);
       }
     }
-    k_mutex_unlock(&head_lock);
+    head_unlock();
   }
 }
 
@@ -1544,19 +2009,19 @@ static void bringup_thread(void *a, void *b, void *c)
   /* This image is deliberately safe with branch power absent. Its devicetree
    * does not enable any servo UART or fan pin, and this path never calls the
    * board, Dynamixel, fan, calibration-storage, torque, or homing routines. */
-  k_mutex_lock(&head_lock, K_FOREVER);
+  head_lock_at(__LINE__);
   head_config_default(&calibration);
   head_control_init(&runtime, &calibration);
   head_state_fault(&runtime, HEAD_FAULT_CONFIGURATION);
   atomic_set(&boot_complete, 1);
-  k_mutex_unlock(&head_lock);
+  head_unlock();
   return;
 #else
   /* Initialize and release the motor buses before waiting for USB.  The first
    * write is a configuration-independent broadcast Torque Enable=0 on every
    * branch, so an actuator with an unsafe saved startup setting is not left
    * energized during host enumeration. */
-  k_mutex_lock(&head_lock, K_FOREVER);
+  head_lock_at(__LINE__);
   (void)head_config_load(&calibration);
 #if defined(HEAD_BENCH_J3_ID10)
   /* Volatile diagnostic profile: isolate J3 without modifying NVS. Keep the
@@ -1647,7 +2112,7 @@ static void bringup_thread(void *a, void *b, void *c)
   head_config_finalize(&calibration);
 #endif
   head_control_init(&runtime, &calibration);
-  k_mutex_unlock(&head_lock);
+  head_unlock();
 
   const int dxl_init_result = head_dxl_init();
   const int emergency_off_result = dxl_init_result == 0 ?
@@ -1663,7 +2128,7 @@ static void bringup_thread(void *a, void *b, void *c)
     k_sleep(K_MSEC(10));
   }
 
-  k_mutex_lock(&head_lock, K_FOREVER);
+  head_lock_at(__LINE__);
   if (dxl_init_result != 0 || fan_init_result != 0 ||
       !head_config_validate(&calibration)) {
     head_state_fault(&runtime, HEAD_FAULT_CONFIGURATION);
@@ -1679,7 +2144,7 @@ static void bringup_thread(void *a, void *b, void *c)
     runtime.torque_state = HEAD_TORQUE_OFF_VERIFIED;
   }
   atomic_set(&boot_complete, 1);
-  k_mutex_unlock(&head_lock);
+  head_unlock();
 #endif
 }
 
@@ -1706,6 +2171,7 @@ int main(void)
   } else {
     boot_reset_cause = 0u;
   }
+  black_box_boot();
   if (sys_csrand_get(&boot_session_id, sizeof(boot_session_id)) != 0 ||
       boot_session_id == 0u) {
     boot_session_id = sys_rand32_get() ^ k_cycle_get_32() ^ 0x48454144u;
@@ -1734,9 +2200,9 @@ int main(void)
       /* Only a real start failure faults. "Not compiled in" is checked above
        * at build time and never reaches here. */
       if (hardware_watchdog_start() != 0) {
-        k_mutex_lock(&head_lock, K_FOREVER);
+        head_lock_at(__LINE__);
         head_state_fault(&runtime, HEAD_FAULT_WATCHDOG);
-        k_mutex_unlock(&head_lock);
+        head_unlock();
       }
 #endif
       k_thread_start(head_control_thread);

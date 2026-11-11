@@ -25,6 +25,13 @@
 #define HEAD_CAP_TORQUE_READBACK       (1ull << 7u)
 #define HEAD_CAP_PROPRIOCEPTION_HOLD   (1ull << 8u)
 #define HEAD_CAP_ROUTING_HOLD           (1ull << 9u)
+#define HEAD_CAP_TUNING                 (1ull << 10u)
+#define HEAD_CAP_BLACK_BOX              (1ull << 11u)
+#define HEAD_CAP_BUS_STATS              (1ull << 12u)
+#define HEAD_CAP_ENABLE_AT_PRESENT_POSE (1ull << 13u)
+#define HEAD_CAP_POSITION_RANGE         (1ull << 14u)
+#define HEAD_CAP_PRESENT_PWM            (1ull << 15u)
+#define HEAD_CAP_CONTROL_TIMING         (1ull << 16u)
 
 enum head_message_type {
   HEAD_MSG_HELLO = 1,
@@ -71,6 +78,30 @@ enum head_message_type {
   /* Homing for a joint with no mechanical stop: drive each active servo to the
    * nearest encoder zero and take that as its reference. */
   HEAD_MSG_ZERO_HOME,
+  /* Torque on at the present pose with Goal Current capped, then hold. */
+  HEAD_MSG_START_TUNING,
+  /* Move one servo a single tick toward or away from its tuning neutral. */
+  HEAD_MSG_TUNING_STEP,
+  /* Read the lock and control-phase record kept from the previous boot. */
+  HEAD_MSG_GET_BLACK_BOX,
+  HEAD_MSG_BLACK_BOX,
+  /* Per-branch receive-error and per-servo missed-reply counts since boot. */
+  HEAD_MSG_GET_BUS_STATS,
+  HEAD_MSG_BUS_STATS,
+  /* Torque on and ENABLED without homing: q maps to the profile's raw
+   * min_tick..max_tick, and every active servo must already be inside it. */
+  HEAD_MSG_ENABLE_AT_PRESENT_POSE,
+  /* The ticks that q = 0 and q = 1 map to for every servo. */
+  HEAD_MSG_GET_POSITION_RANGE,
+  HEAD_MSG_POSITION_RANGE,
+  /* Present PWM of every servo, sent right after each STATE. STATE is full
+   * (512 bytes), so this cannot be added to it. */
+  HEAD_MSG_PRESENT_PWM,
+  /* Control-loop timing: cycle count and start time, period bins, schedule
+   * restarts, busy time and head_lock wait. BUS_STATS is full (508 of 512
+   * bytes), so this cannot be added to it. */
+  HEAD_MSG_GET_CONTROL_TIMING,
+  HEAD_MSG_CONTROL_TIMING,
 };
 
 struct head_frame {

@@ -31,12 +31,18 @@ See:
 ## Confirmed project scope
 
 - Up to 20 ROBOTIS Dynamixel XC330-T181-T servos on four independent 1 Mbps
-  TTL half-duplex buses, with five addresses reserved per branch.
+  TTL half-duplex buses, at most five per branch. Servo IDs are 0–19 and
+  unique across the head, but any ID may be cabled to any branch: each
+  servo's `branch` field in the calibration profile says where it is, and
+  discovery faults if a servo does not answer there.
 - All 20 servos are now on hand. The original twelve use IDs 0 through 11;
   the eight newly received units are reserved for IDs 12 through 19 but remain
   uncommissioned until each is individually assigned, changed to 1 Mbps, and
-  verified. The confirmed final assignment is sequential: IDs 0–4 on J1,
-  5–9 on J2, 10–14 on J3, and 15–19 on J4.
+  verified. The original plan was sequential (IDs 0–4 on J1, 5–9 on J2,
+  10–14 on J3, 15–19 on J4); since 2026-09-28 the branch is taken from the
+  profile instead, so the cabling can differ. Regenerate the profile from
+  `headctl probe` output after re-cabling:
+  `scripts/generate_profile.py --probe-output probe.txt --output profile.json`.
 - Current-based position control is the intended Dynamixel operating mode.
 - Position-only commands are the first priority. Position plus velocity
   feed-forward should be supported next; velocity-only operation is useful but
@@ -47,8 +53,9 @@ See:
 - Complete measured actuator feedback is required at at least 100 Hz.
 - A confirmed serious fault disables torque on the entire head.
 - Homing pulls a tendon slowly until sustained current indicates mechanical
-  resistance. The co-actuated groups are `{9, 12, 14}` and `{8, 17, 19}`;
-  members of a group must home separately. Other servos may eventually home
+  resistance. The co-actuated groups are the right modiolus `{8, 11, 14}`
+  and the left modiolus `{9, 16, 19}`; members of a group must home
+  separately. Other servos may eventually home
   concurrently, but first commissioning remains one servo at a time.
 - The model initially runs on a desktop and may later move to the local Jetson.
 
@@ -89,7 +96,7 @@ All four servo connectors use the same pin order:
 
 The branch assignments are:
 
-| Branch | Connector | Teensy RX / TX | Teensy direction pin | Intended IDs |
+| Branch | Connector | Teensy RX / TX | Teensy direction pin | Default IDs (profile may differ) |
 |---:|---|---:|---:|---:|
 | 0 | J1 | 0 / 1 | 4 | 0–4 |
 | 1 | J2 | 25 / 24 | 12 | 5–9 |
@@ -137,6 +144,14 @@ cable. On Linux it normally appears as `/dev/ttyACM0` and `/dev/ttyACM1`:
 - CDC0 is the Zephyr diagnostic console.
 - CDC1 is the framed head-control and telemetry endpoint.
 
+The numbers are not stable. Linux keeps a `ttyACM` number in use until every
+program that opened it closes it, so a controller reset while a program still
+holds `/dev/ttyACM1` brings CDC1 back as `/dev/ttyACM2`. The host tools
+(`headctl`, the tuning panel and `head_bridge`) therefore default to
+`--port auto` (ROS parameter `port`): they open the one
+`/dev/serial/by-id/usb-ZEPHYR_Head*-if02` link (interface 02 is CDC1), and they
+open it exclusively, so a second tool cannot share the port.
+
 The desktop ROS bridge opens CDC1 and translates ROS messages to the compact
 firmware protocol. The ML model does not need to know the USB framing; it can
 publish through the ROS-facing interface. A future Jetson-hosted model can use
@@ -151,10 +166,11 @@ the same arrangement.
 | Direction GPIO map/turnaround | Corrected to PCB; OE release waits the NXP LPUART transmission-complete flag; hardware test pending |
 | Dynamixel CRC | Implemented and cross-checked |
 | Dynamixel transmit byte stuffing | Implemented; official-vector coverage still needed |
-| Position command | Protocol v2 normalized `POSITION` implemented |
+| Position command | Protocol v2 normalized `POSITION` implemented; on entry to ENABLED `q` is seeded from the measured positions (2026-10-08) |
+| Enable without homing | `ENABLE_AT_PRESENT_POSE` maps `q` to the profile's raw `min_tick..max_tick` and refuses any servo outside it; `POSITION_RANGE` lets the bridge publish normalized positions, which unlocks the jog panel; HIL validation pending |
 | Position + velocity / velocity-only | Represented in v2 but explicitly rejected pending control-law validation |
 | Servo safety commissioning | Requires firmware v38+ (v46+ for Startup Configuration), mode 5, Protocol 2.0, 1 Mbps, Secondary ID disabled, conservative thermal/voltage/PWM/current/shutdown limits, normalized gains, safe startup torque, and watchdog readback |
-| Servo current | Calibration v4 separates operating and homing limits; each physical branch's active operating limits must fit a 2,500 mA budget, checked first before torque-on and supervised independently from fresh live current telemetry |
+| Servo current | Calibration v4 separates operating and homing limits; the configured totals per branch are not limited (decided 2026-10-06, so every servo can have 600 mA); the measured branch current is supervised live from fresh telemetry and faults the head above 2,500 mA |
 | 500 Hz fixed-period scheduling | Absolute scheduler and parallel DMA TX implemented; target measurement pending |
 | 100 Hz telemetry | Full five-servo branch response is staged/drained; single-owner schedule implemented; hardware acceptance pending |
 | Present velocity / feedback age | Implemented in v2 state |

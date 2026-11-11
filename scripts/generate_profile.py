@@ -6,17 +6,27 @@ J1 and J2 are out of service. Validation mirrors head_config_validate() in
 firmware/src/config.c so a profile can be rejected here instead of on the
 device.
 
+Any servo ID may sit on any branch, up to five per branch. With --probe-output
+the active servos and their branches are taken from saved `headctl probe`
+output, so re-cabling is: probe every branch, regenerate, upload:
+
+    for branch in 0 1 2 3; do headctl probe --branch $branch --baud 1000000; done > probe.txt
+    scripts/generate_profile.py --probe-output probe.txt --output profile.json
+
 The homing fields are conservative bring-up placeholders, not commissioned
 mechanical values. See the WARNING printed on generation.
 """
 import argparse
 import json
 import math
+import re
 import sys
 
 HEAD_SERVO_COUNT = 20
 HEAD_BRANCH_COUNT = 4
 HEAD_SERVOS_PER_BRANCH = 5
+# Measured branch current above this faults the head (firmware live check,
+# HEAD_BRANCH_CURRENT_BUDGET_MA). Configured totals are not limited.
 HEAD_BRANCH_CURRENT_BUDGET_MA = 2500
 HEAD_DXL_POSITION_MIN_TICK = -1048575
 HEAD_DXL_POSITION_MAX_TICK = 1048575
@@ -25,17 +35,22 @@ DXL_OPERATING_CURRENT_MAX_MA = 910
 # Indices 10-14 are J3, 15-19 are J4.
 DEFAULT_ACTIVE_SERVO_MASK = 0xFFC00
 
-# Measured unloaded draw is about 400 mA per servo. Five per branch sums to
-# 2000 mA, inside the 2500 mA budget and the 3 A branch fuse.
+# Measured unloaded draw is about 400 mA per servo.
 OPERATING_CURRENT_MA = 400
 HOMING_CURRENT_MA = 120
 HOMING_CURRENT_LIMIT_MA = 200
 
 
-def joint_slot(servo_index: int, is_active: bool) -> dict:
+# One line of `headctl probe` output, e.g. "J2: id=15 model=1210 firmware=53".
+PROBE_LINE = re.compile(r"^J([1-4]): id=(\d+)\b")
+
+
+def joint_slot(servo_index: int, is_active: bool, branch_index: int | None = None) -> dict:
+    if branch_index is None:
+        branch_index = servo_index // HEAD_SERVOS_PER_BRANCH
     slot = {
         "index": servo_index,
-        "branch": servo_index // HEAD_SERVOS_PER_BRANCH,
+        "branch": branch_index,
         "id": servo_index,
         "reserved": 0,
         "min_tick": 0,
@@ -65,7 +80,30 @@ def joint_slot(servo_index: int, is_active: bool) -> dict:
     return slot
 
 
-def build_profile(active_servo_mask: int) -> dict:
+def parse_probe_output(text: str) -> dict[int, int]:
+    """Map servo ID to branch index from saved `headctl probe` output."""
+    branch_by_id: dict[int, int] = {}
+    for line in text.splitlines():
+        match = PROBE_LINE.match(line.strip())
+        if match is None:
+            continue
+        branch_index = int(match.group(1)) - 1
+        servo_id = int(match.group(2))
+        if servo_id >= HEAD_SERVO_COUNT:
+            raise ValueError(f"J{branch_index + 1}: id={servo_id} is outside 0-"
+                             f"{HEAD_SERVO_COUNT - 1}; reassign it before profiling")
+        if servo_id in branch_by_id and branch_by_id[servo_id] != branch_index:
+            raise ValueError(f"id={servo_id} answered on both J{branch_by_id[servo_id] + 1} "
+                             f"and J{branch_index + 1}; IDs must be unique across the head")
+        branch_by_id[servo_id] = branch_index
+    if not branch_by_id:
+        raise ValueError("no `Jn: id=N` lines found in the probe output")
+    return branch_by_id
+
+
+def build_profile(active_servo_mask: int,
+                  branch_by_index: dict[int, int] | None = None) -> dict:
+    branch_by_index = branch_by_index or {}
     active_count = bin(active_servo_mask).count("1")
     return {
         "version": 4,
@@ -74,7 +112,8 @@ def build_profile(active_servo_mask: int) -> dict:
         "thermal_start_c": 45,
         "thermal_full_c": 60,
         "active_servo_mask": active_servo_mask,
-        "joints": [joint_slot(index, bool(active_servo_mask & (1 << index)))
+        "joints": [joint_slot(index, bool(active_servo_mask & (1 << index)),
+                              branch_by_index.get(index))
                    for index in range(HEAD_SERVO_COUNT)],
     }
 
@@ -95,7 +134,7 @@ def validate(profile: dict) -> list[str]:
         errors.append("active_servo_mask empty or out of range")
 
     slots = {int(slot["index"]): slot for slot in profile["joints"]}
-    branch_current_ma = [0] * HEAD_BRANCH_COUNT
+    branch_servo_count = [0] * HEAD_BRANCH_COUNT
     active_count = 0
 
     for servo_index in range(HEAD_SERVO_COUNT):
@@ -107,9 +146,12 @@ def validate(profile: dict) -> list[str]:
             continue
         slot = slots[servo_index]
         label = f"slot {servo_index}"
-        expected_branch = servo_index // HEAD_SERVOS_PER_BRANCH
-        if int(slot["branch"]) != expected_branch:
-            errors.append(f"{label}: branch must be {expected_branch}")
+        branch_index = int(slot["branch"])
+        if not 0 <= branch_index < HEAD_BRANCH_COUNT:
+            errors.append(f"{label}: branch must be 0-{HEAD_BRANCH_COUNT - 1}")
+            branch_index = None
+        else:
+            branch_servo_count[branch_index] += 1
         if int(slot["id"]) != servo_index:
             errors.append(f"{label}: id must equal index ({servo_index})")
 
@@ -170,12 +212,10 @@ def validate(profile: dict) -> list[str]:
         if not 0 < homing_backoff_ticks <= homing_max_travel_ticks:
             errors.append(f"{label}: homing_backoff_ticks out of range")
 
-        branch_current_ma[expected_branch] += max(operating_current_ma, 0)
-
-    for branch_index, total_ma in enumerate(branch_current_ma):
-        if total_ma > HEAD_BRANCH_CURRENT_BUDGET_MA:
-            errors.append(f"branch {branch_index}: operating current {total_ma} mA "
-                          f"exceeds the {HEAD_BRANCH_CURRENT_BUDGET_MA} mA budget")
+    for branch_index, servo_count in enumerate(branch_servo_count):
+        if servo_count > HEAD_SERVOS_PER_BRANCH:
+            errors.append(f"branch {branch_index} (J{branch_index + 1}): {servo_count} active "
+                          f"servos exceeds {HEAD_SERVOS_PER_BRANCH}")
 
     if active_count != expected_servo_count:
         errors.append(f"expected_servo_count {expected_servo_count} does not match "
@@ -189,17 +229,35 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--mask", type=lambda value: int(value, 0),
-                        default=DEFAULT_ACTIVE_SERVO_MASK,
                         help="active_servo_mask (default: 0xFFC00, indices 10-19)")
+    parser.add_argument("--probe-output",
+                        help="saved `headctl probe` output ('-' for stdin); activates "
+                             "every servo found, on the branch it answered on")
     parser.add_argument("--output", help="write the profile here instead of stdout")
     parser.add_argument("--check", help="validate an existing profile and exit")
     arguments = parser.parse_args()
 
+    if arguments.probe_output and (arguments.mask is not None or arguments.check):
+        parser.error("--probe-output cannot be combined with --mask or --check")
     if arguments.check:
         with open(arguments.check, encoding="utf-8") as source:
             profile = json.load(source)
+    elif arguments.probe_output:
+        if arguments.probe_output == "-":
+            probe_text = sys.stdin.read()
+        else:
+            with open(arguments.probe_output, encoding="utf-8") as source:
+                probe_text = source.read()
+        try:
+            branch_by_id = parse_probe_output(probe_text)
+        except ValueError as error:
+            print(f"probe output REJECTED: {error}", file=sys.stderr)
+            return 1
+        active_servo_mask = sum(1 << servo_id for servo_id in branch_by_id)
+        profile = build_profile(active_servo_mask, branch_by_id)
     else:
-        profile = build_profile(arguments.mask)
+        mask = DEFAULT_ACTIVE_SERVO_MASK if arguments.mask is None else arguments.mask
+        profile = build_profile(mask)
 
     errors = validate(profile)
     if errors:
@@ -212,13 +270,15 @@ def main() -> int:
     print(f"profile valid: {active_count} active servos, "
           f"mask 0x{int(profile['active_servo_mask']):05X}", file=sys.stderr)
     for branch_index in range(HEAD_BRANCH_COUNT):
-        total_ma = sum(int(slot["operating_current_ma"])
-                       for slot in profile["joints"]
-                       if int(profile["active_servo_mask"]) & (1 << int(slot["index"]))
-                       and int(slot["index"]) // HEAD_SERVOS_PER_BRANCH == branch_index)
-        if total_ma:
-            print(f"  branch {branch_index} (J{branch_index + 1}): {total_ma} mA "
-                  f"of {HEAD_BRANCH_CURRENT_BUDGET_MA} mA", file=sys.stderr)
+        slots = [slot for slot in profile["joints"]
+                 if int(profile["active_servo_mask"]) & (1 << int(slot["index"]))
+                 and int(slot["branch"]) == branch_index]
+        if slots:
+            total_ma = sum(int(slot["operating_current_ma"]) for slot in slots)
+            servo_ids = ",".join(str(int(slot["id"])) for slot in slots)
+            print(f"  branch {branch_index} (J{branch_index + 1}): ids {servo_ids}, "
+                  f"{total_ma} mA configured (measured above "
+                  f"{HEAD_BRANCH_CURRENT_BUDGET_MA} mA faults the head)", file=sys.stderr)
     if arguments.check:
         return 0
 

@@ -14,6 +14,9 @@ import threading
 import time
 import tty
 import zlib
+import importlib.util
+import math
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 helpers = runpy.run_path(str(ROOT / 'tests/host_transport_test.py'))
@@ -55,6 +58,131 @@ class PtySerial:
         os.close(self.fd)
 
 
+def load_headctl():
+    sys.modules.setdefault('serial', __import__('types').SimpleNamespace(Serial=object))
+    spec = importlib.util.spec_from_file_location(
+        'headctl_for_integration', ROOT / 'host_ros/src/head_ros/head_ros/headctl.py')
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+    return loaded
+
+
+headctl = load_headctl()
+
+
+class CallbackFuture:
+    def __init__(self):
+        self.callbacks, self.value, self.error, self.is_done = [], None, None, False
+    def add_done_callback(self, callback):
+        if self.is_done: callback(self)
+        else: self.callbacks.append(callback)
+    def set_result(self, value):
+        self.value, self.is_done = value, True
+        for callback in self.callbacks: callback(self)
+    def set_exception(self, error):
+        self.error, self.is_done = error, True
+        for callback in self.callbacks: callback(self)
+    def result(self):
+        if self.error: raise self.error
+        return self.value
+
+
+def position_range_payload(transaction_id, generation, ranges, homed_mask=0):
+    payload = bytearray(headctl.POSITION_RANGE_PAYLOAD_LENGTH)
+    valid_mask = sum(1 << index for index in ranges)
+    struct.pack_into('<IB3xII', payload, 0, transaction_id, generation, valid_mask, homed_mask)
+    for index, (minimum, maximum) in ranges.items():
+        struct.pack_into('<ii', payload, 16 + index * 8, minimum, maximum)
+    return bytes(payload)
+
+
+def test_position_range_cache():
+    from types import SimpleNamespace, MethodType
+    class State:
+        def __init__(self): self.servos = []
+    class Fields: pass
+    test_namespace = {'HeadState': State, 'Header': Fields, 'ServoState': Fields,
+                      'SERVO_COUNT': 20, 'struct': struct, 'time': time,
+                      'STATE_POSITION_RANGE_GENERATION_OFFSET':
+                          headctl.STATE_POSITION_RANGE_GENERATION_OFFSET,
+                      'CAP_POSITION_RANGE': headctl.CAP_POSITION_RANGE,
+                      'MSG_GET_POSITION_RANGE': headctl.GET_POSITION_RANGE,
+                      'MSG_POSITION_RANGE': headctl.POSITION_RANGE,
+                      'decode_position_range': headctl.decode_position_range,
+                      'normalized_position': headctl.normalized_position,
+                      'TransportError': module.TransportError, 'Future': CallbackFuture}
+    bridge_class = next(node for node in bridge_ast.body if isinstance(node, ast.ClassDef) and node.name == 'HeadBridge')
+    methods = [node for node in bridge_class.body if isinstance(node, ast.FunctionDef) and
+               node.name in ('on_state', '_current_position_ranges', '_request_position_range')]
+    exec(compile(ast.Module(body=methods, type_ignores=[]), '<production bridge ranges>', 'exec'), test_namespace)
+    requests = []
+    def request(message_type, timeout_s, response_types):
+        future = CallbackFuture()
+        requests.append((message_type, response_types, future))
+        return future
+    warnings = []
+    bridge = SimpleNamespace(controller_session_id=17, negotiation_generation=0,
+        active_servo_mask=0b11, packet_errors=0,
+        joint_names=[f'servo_{index}' for index in range(20)],
+        state_publisher=SimpleNamespace(publish=lambda state: None),
+        transport=SimpleNamespace(request=request),
+        get_logger=lambda: SimpleNamespace(warning=warnings.append),
+        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: None)),
+        capabilities=headctl.CAP_POSITION_RANGE, position_range=None,
+        position_range_request_pending=False)
+    for name in ('_current_position_ranges', '_request_position_range'):
+        setattr(bridge, name, MethodType(test_namespace[name], bridge))
+    on_state = lambda payload: test_namespace['on_state'](bridge, bytes(payload))
+
+    payload = bytearray(512)
+    struct.pack_into('<I', payload, 28, 17)
+    payload[headctl.STATE_POSITION_RANGE_GENERATION_OFFSET] = 5
+    struct.pack_into('<ii', payload, 32, -450, -1200)          # servo 0 goal, present
+    struct.pack_into('<ii', payload, 32 + 24, 0, 0)            # servo 1
+    # No range yet: NaN, and exactly one request however many samples arrive.
+    on_state(payload)
+    on_state(payload)
+    assert math.isnan(bridge.latest_state.servos[0].present_normalized)
+    assert len(requests) == 1 and requests[0][0] == headctl.GET_POSITION_RANGE
+    assert requests[0][1] == (headctl.POSITION_RANGE,)
+    requests[0][2].set_result((True, position_range_payload(9, 5, {0: (-1200, 300)}), 46))
+    on_state(payload)
+    servo0, servo1 = bridge.latest_state.servos[0], bridge.latest_state.servos[1]
+    assert servo0.present_normalized == 0.0 and servo0.goal_normalized == 0.5
+    # A servo without a valid range stays NaN.
+    assert math.isnan(servo1.present_normalized) and len(requests) == 1
+    # Outside the range is reported unclamped.
+    struct.pack_into('<i', payload, 36, 330)
+    on_state(payload)
+    assert bridge.latest_state.servos[0].present_normalized == 1.02
+    # A new generation (homing, profile applied) invalidates the cache at once.
+    payload[headctl.STATE_POSITION_RANGE_GENERATION_OFFSET] = 6
+    on_state(payload)
+    assert math.isnan(bridge.latest_state.servos[0].present_normalized) and len(requests) == 2
+    # A failed request is logged, and the next sample asks again.
+    requests[1][2].set_exception(module.TransportTimeout('no reply'))
+    assert bridge.position_range is None and warnings
+    on_state(payload)
+    assert len(requests) == 3
+    # Firmware without the capability is never asked.
+    bridge.capabilities = 0
+    on_state(payload)
+    assert len(requests) == 3 and math.isnan(bridge.latest_state.servos[0].present_normalized)
+
+    # Decoder and transport matching.
+    decoded = headctl.decode_position_range(position_range_payload(9, 5, {0: (-1200, 300)}, 1))
+    assert decoded['ranges'] == {0: (-1200, 300)} and decoded['homed_mask'] == 1
+    for bad in (b'\0' * 10, position_range_payload(9, 5, {0: (300, 300)})):
+        try:
+            headctl.decode_position_range(bad)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError('accepted a malformed position range')
+    assert module.SerialTransport._response_transaction(
+        46, position_range_payload(0x01020304, 5, {})) == 0x01020304
+
+
 def test_state_and_owner_lifecycle():
     from types import SimpleNamespace, MethodType
     class State:
@@ -65,10 +193,19 @@ def test_state_and_owner_lifecycle():
         def __init__(self): self.servos = []
     class Fields: pass
     test_namespace = {'HeadState': State, 'Header': Fields, 'ServoState': Fields,
-                      'SERVO_COUNT': 20, 'struct': struct, 'time': time}
+                      'SERVO_COUNT': 20, 'struct': struct, 'time': time,
+                      'STATE_POSITION_RANGE_GENERATION_OFFSET':
+                          headctl.STATE_POSITION_RANGE_GENERATION_OFFSET,
+                      'CAP_POSITION_RANGE': headctl.CAP_POSITION_RANGE,
+                      'MSG_GET_POSITION_RANGE': headctl.GET_POSITION_RANGE,
+                      'MSG_POSITION_RANGE': headctl.POSITION_RANGE,
+                      'decode_position_range': headctl.decode_position_range,
+                      'normalized_position': headctl.normalized_position,
+                      'TransportError': module.TransportError, 'Future': Future}
     bridge_class = next(node for node in bridge_ast.body if isinstance(node, ast.ClassDef) and node.name == 'HeadBridge')
     methods = [node for node in bridge_class.body if isinstance(node, ast.FunctionDef) and
-               node.name in ('on_state', '_reset_controller_session')]
+               node.name in ('on_state', '_reset_controller_session',
+                             '_current_position_ranges', '_request_position_range')]
     exec(compile(ast.Module(body=methods, type_ignores=[]), '<production bridge lifecycle>', 'exec'), test_namespace)
     resets = []
     published = []
@@ -78,8 +215,11 @@ def test_state_and_owner_lifecycle():
         joint_names=[f'servo_{index}' for index in range(20)],
         state_publisher=SimpleNamespace(publish=published.append),
         transport=SimpleNamespace(reset_pending=resets.append),
-        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: None)))
+        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: None)),
+        capabilities=0, position_range=None, position_range_request_pending=False)
     bridge._reset_controller_session = MethodType(test_namespace['_reset_controller_session'], bridge)
+    for name in ('_current_position_ranges', '_request_position_range'):
+        setattr(bridge, name, MethodType(test_namespace[name], bridge))
     payload = bytearray(512)
     struct.pack_into('<BBBBHIIH', payload, 0, 9, 0, 1, 0, 5000, 123456, 1, 500)
     payload[16] = 2
@@ -164,9 +304,53 @@ def test_action_completion_and_cancellation():
         assert events[-1] == 'timer destroyed'
 
 
+def test_bridge_diagnostics_layout():
+    # Production on_diagnostics with the shared headctl decoder, on a payload
+    # built field by field in the order send_diagnostics() (src/main.c) writes.
+    import importlib.util
+    import sys
+    from types import SimpleNamespace
+    sys.modules.setdefault('serial', SimpleNamespace(Serial=object))
+    spec = importlib.util.spec_from_file_location(
+        'headctl_for_bridge_test', ROOT / 'host_ros/src/head_ros/head_ros/headctl.py')
+    headctl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(headctl)
+    bridge_class = next(node for node in bridge_ast.body if isinstance(node, ast.ClassDef) and node.name == 'HeadBridge')
+    method = next(node for node in bridge_class.body if isinstance(node, ast.FunctionDef) and
+                  node.name == 'on_diagnostics')
+    test_namespace = {'decode_diagnostics': headctl.decode_diagnostics}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), '<production bridge diagnostics>', 'exec'), test_namespace)
+    payload = bytearray(209)
+    struct.pack_into('<BBIII', payload, 0, 5, 0, 7, 1234, 2100)
+    for branch in range(4):
+        struct.pack_into('<BBBBIIIIIIII', payload, 14 + 36 * branch, branch, 0, 0x1F, 0x1F,
+                         0, 0, 0, 10 + branch, 20 + branch, 0, 30 + branch, 40 + branch)
+    struct.pack_into('<III', payload, 158, 1, 2, 3)        # USB drops/bytes/coalesced
+    payload[170] = 3                                        # storage succeeded
+    struct.pack_into('<iI', payload, 174, 0, 42)            # storage result, generation
+    struct.pack_into('<I', payload, 182, 0x10)              # boot reset cause: watchdog
+    bridge = SimpleNamespace(packet_errors=0, branch_diagnostics={})
+    test_namespace['on_diagnostics'](bridge, bytes(payload))
+    assert bridge.packet_errors == 0
+    assert sorted(bridge.branch_diagnostics) == [0, 1, 2, 3]
+    assert bridge.branch_diagnostics[3] == (13, 23, 33, 43)
+    assert bridge.firmware_protocol_errors == 10 + 11 + 12 + 13
+    assert bridge.firmware_control_deadline_misses == 7
+    assert bridge.firmware_control_max_period_us == 2100
+    assert (bridge.usb_dropped_frames, bridge.usb_dropped_bytes, bridge.usb_coalesced_frames) == (1, 2, 3)
+    assert bridge.storage_state == 3 and bridge.storage_result == 0
+    assert bridge.calibration_generation == 42 and bridge.reset_cause == 0x10
+    test_namespace['on_diagnostics'](bridge, bytes(payload[:186]))
+    assert bridge.packet_errors == 1
+    print('bridge DIAGNOSTICS layout: PASS')
+
+
 def main():
     test_state_and_owner_lifecycle()
+    test_position_range_cache()
+    print('bridge position range cache: PASS')
     test_action_completion_and_cancellation()
+    test_bridge_diagnostics_layout()
     # Services/actions use reentrant groups; suspended serial futures must not
     # retain the target/timer callback group. This is a structural guard, not ROS QA.
     for node in ast.walk(bridge_ast):

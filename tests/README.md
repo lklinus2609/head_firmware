@@ -12,7 +12,8 @@ cc -std=c99 -Wall -Wextra -Werror -Iinclude \
 
 The logic suite also covers calibration validation, the fixed-width storage
 schema, lease rollover, command sequencing, the static-proprioception
-lifecycle, the zero-degree routing lifecycle, randomized trajectory limits,
+lifecycle, the zero-degree routing lifecycle, enable at present pose and
+exact `q` seeding at Enable, randomized trajectory limits,
 terminal homing for single/sparse/full inventories, latched-fault recovery and
 shutdown idempotence, storage/preparation exclusion, and shifted position
 range boundaries:
@@ -44,8 +45,10 @@ python3 tests/run_main_regression.py
 
 Host transport tests cover bounded writes, ACK matching, queue priority,
 coalescing, reset, and fragmented OS PTY traffic. The integration suite also
-executes production bridge/collector lifecycle methods and maintenance completion
-and cancellation. It uses ROS stubs and a small serial adapter; it does not test
+executes production bridge/collector lifecycle methods, the bridge's
+position-range cache, maintenance completion
+and cancellation, and the bridge DIAGNOSTICS decoder against the firmware
+payload layout. It uses ROS stubs and a small serial adapter; it does not test
 a live ROS executor or the installed pySerial driver:
 
 ```sh
@@ -54,7 +57,8 @@ python3 tests/host_integration_test.py
 ```
 
 The ROS-free commissioning regression checks ACK deadlines/session identity,
-profile compatibility, and completion/readback of persistence:
+profile compatibility, completion/readback of persistence, the DIAGNOSTICS
+decoder, and `--port auto` port selection:
 
 ```sh
 python3 tests/headctl_test.py
@@ -65,6 +69,91 @@ The collection state and atomic-session writer are also ROS-independent:
 ```sh
 python3 tests/collection_core_test.py
 ```
+
+The jog panel's seeding, streaming, lease and pose rules are ROS-independent
+too. They do not cover the Qt window or a live ROS executor:
+
+```sh
+python3 tests/jog_core_test.py
+```
+
+The tuning panel's link, lease handling, record writing, PWM pairing,
+telemetry log and jaw sweep (on the simulator's tendon model, with lines the
+horns cannot feel the jaw through: release tendons pay out so the jaw opens,
+come back to their start when it closes, a jaw with no room is not forced;
+abort, wrong pull direction, travel limit and stage timeout) are tested against the in-process simulated
+controller, together with the profile proposal tool:
+
+```sh
+python3 tests/tuning_core_test.py
+```
+
+The face workspace guard (action mapping, the no-fighting rule, speed limit,
+follower steps, live stop checks) is pure Python:
+
+```sh
+python3 tests/workspace_guard_test.py
+```
+
+The ENABLED-mode face session (enable at the present pose, target frames
+and their q rounding, followers, jaw-dependent neutrals, the command
+watchdog, the stop checks and the session neutral file) runs on the
+simulated board:
+
+```sh
+python3 tests/face_stream_test.py
+```
+
+The knee rule of the modiolus knee test (baseline, noise, threshold, knee):
+
+```sh
+python3 tests/knee_finder_test.py
+```
+
+Finding the face in the camera picture (the knee test's corner boxes) needs
+OpenCV, so it runs with the bench venv:
+
+```sh
+../bench/.venv/bin/python tests/knee_camera_test.py
+```
+
+The face marker tracker needs numpy, so it runs with the bench venv:
+
+```sh
+../bench/.venv/bin/python tests/face_markers_test.py
+```
+
+The lip-sync additions (2026-11-08). The mouth trajectory file, the session's
+upper lips from the panel marks, trajectory streaming, the command log, the
+audio start and the camera mode, and the babbling generator are pure Python:
+
+```sh
+python3 tests/mouth_actions_test.py
+```
+
+```sh
+python3 tests/face_stream_lipsync_test.py
+```
+
+```sh
+python3 tests/babble_test.py
+```
+
+The mouth measures (drawn faces; the MediaPipe lip landmark numbers against
+the installed table) and the viseme tool (targets from photos, the pose
+sequencer, the search on the simulated board with a simulated mouth) need
+numpy, Pillow and MediaPipe, so they run with the bench venv:
+
+```sh
+../bench/.venv/bin/python tests/mouth_shape_test.py
+```
+
+```sh
+../bench/.venv/bin/python tests/viseme_tuner_test.py
+```
+
+The lip-sync training side has its own tests in `../../lipsync/tests`
+(`../../lipsync/README.md`).
 
 The model-data window regression lives in `../../proprioception/tests` and
 requires the packages in `../../proprioception/requirements.txt`:

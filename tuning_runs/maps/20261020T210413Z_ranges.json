@@ -1,0 +1,253 @@
+{
+  "format": "head-tendon-ranges-1",
+  "started_utc": "2026-10-20T21:04:13.002838+00:00",
+  "boxes": {
+    "jaw": "7",
+    "stages": "4",
+    "pull": "8+ 11+ 14+ 9+ 16- 19-",
+    "release": "8 9 11 14 16 19",
+    "preload_ma": "35",
+    "band_ma": "8",
+    "jaw_push_ma": "580",
+    "abort_ma": "280",
+    "max_travel_ticks": "2000",
+    "defer_on_open": "8 9"
+  },
+  "end_ma": 150,
+  "max_pull_ticks": 800,
+  "limit_ma": 650,
+  "slack_ticks": 300,
+  "max_pull_by_servo": {
+    "11": 680,
+    "16": 680,
+    "14": 700,
+    "19": 700
+  },
+  "slices": [
+    {
+      "jaw_opening": 28,
+      "jaw_target": 4000,
+      "jaw_tick": 4000,
+      "jaw_ma": 7,
+      "tendons": {
+        "8": {
+          "end_tick": 3083,
+          "end_goal_tick": 3105,
+          "load_ma": 6,
+          "reason": "pulled 800 ticks without reaching 150 mA",
+          "neutral_tick": 2297,
+          "range_ticks": 786
+        },
+        "11": {
+          "end_tick": 3304,
+          "end_goal_tick": 3347,
+          "load_ma": 131,
+          "reason": "pulled 680 ticks without reaching 150 mA",
+          "neutral_tick": 2658,
+          "range_ticks": 646
+        },
+        "14": {
+          "end_tick": 3788,
+          "end_goal_tick": 3831,
+          "load_ma": 109,
+          "reason": "pulled 700 ticks without reaching 150 mA",
+          "neutral_tick": 3124,
+          "range_ticks": 664
+        },
+        "9": {
+          "end_tick": 2652,
+          "end_goal_tick": 2696,
+          "load_ma": 159,
+          "reason": "end load",
+          "neutral_tick": 2159,
+          "range_ticks": 493
+        },
+        "16": {
+          "end_tick": -110,
+          "end_goal_tick": -150,
+          "load_ma": -60,
+          "reason": "pulled 680 ticks without reaching 150 mA",
+          "neutral_tick": 545,
+          "range_ticks": 655
+        },
+        "19": {
+          "end_tick": 2173,
+          "end_goal_tick": 2130,
+          "load_ma": -108,
+          "reason": "pulled 700 ticks without reaching 150 mA",
+          "neutral_tick": 2845,
+          "range_ticks": 672
+        }
+      }
+    },
+    {
+      "jaw_opening": -12,
+      "jaw_target": 3960,
+      "jaw_tick": 3959,
+      "jaw_ma": -95,
+      "tendons": {
+        "8": {
+          "end_tick": 3049,
+          "end_goal_tick": 3075,
+          "load_ma": 9,
+          "reason": "pulled 800 ticks without reaching 150 mA",
+          "neutral_tick": 2267,
+          "range_ticks": 782
+        },
+        "11": {
+          "end_tick": 3293,
+          "end_goal_tick": 3336,
+          "load_ma": 158,
+          "reason": "end load",
+          "neutral_tick": 2655,
+          "range_ticks": 638
+        },
+        "14": {
+          "end_tick": 3724,
+          "end_goal_tick": 3768,
+          "load_ma": 154,
+          "reason": "end load",
+          "neutral_tick": 3090,
+          "range_ticks": 634
+        },
+        "9": {
+          "end_tick": 2620,
+          "end_goal_tick": 2664,
+          "load_ma": 154,
+          "reason": "end load",
+          "neutral_tick": 1889,
+          "range_ticks": 731
+        },
+        "16": {
+          "end_tick": -153,
+          "end_goal_tick": -195,
+          "load_ma": -94,
+          "reason": "pulled 680 ticks without reaching 150 mA",
+          "neutral_tick": 492,
+          "range_ticks": 645
+        },
+        "19": {
+          "end_tick": 2095,
+          "end_goal_tick": 2052,
+          "load_ma": -96,
+          "reason": "pulled 700 ticks without reaching 150 mA",
+          "neutral_tick": 2762,
+          "range_ticks": 667
+        }
+      }
+    },
+    {
+      "jaw_opening": -52,
+      "jaw_target": 3920,
+      "jaw_tick": 3922,
+      "jaw_ma": -261,
+      "tendons": {
+        "8": {
+          "end_tick": 2805,
+          "end_goal_tick": 2841,
+          "load_ma": 36,
+          "reason": "pulled 800 ticks without reaching 150 mA",
+          "neutral_tick": 2033,
+          "range_ticks": 772
+        },
+        "11": {
+          "end_tick": 3295,
+          "end_goal_tick": 3332,
+          "load_ma": 83,
+          "reason": "pulled 680 ticks without reaching 150 mA",
+          "neutral_tick": 2643,
+          "range_ticks": 652
+        },
+        "14": {
+          "end_tick": 3710,
+          "end_goal_tick": 3752,
+          "load_ma": 124,
+          "reason": "pulled 700 ticks without reaching 150 mA",
+          "neutral_tick": 3048,
+          "range_ticks": 662
+        },
+        "9": {
+          "end_tick": 2529,
+          "end_goal_tick": 2569,
+          "load_ma": 118,
+          "reason": "pulled 800 ticks without reaching 150 mA",
+          "neutral_tick": 1757,
+          "range_ticks": 772
+        },
+        "16": {
+          "end_tick": -156,
+          "end_goal_tick": -193,
+          "load_ma": -75,
+          "reason": "pulled 680 ticks without reaching 150 mA",
+          "neutral_tick": 494,
+          "range_ticks": 650
+        },
+        "19": {
+          "end_tick": 2099,
+          "end_goal_tick": 2050,
+          "load_ma": -107,
+          "reason": "pulled 700 ticks without reaching 150 mA",
+          "neutral_tick": 2759,
+          "range_ticks": 660
+        }
+      }
+    },
+    {
+      "jaw_opening": -92,
+      "jaw_target": 3880,
+      "jaw_tick": 3881,
+      "jaw_ma": -81,
+      "tendons": {
+        "8": {
+          "end_tick": 2621,
+          "end_goal_tick": 2653,
+          "load_ma": 29,
+          "reason": "pulled 800 ticks without reaching 150 mA",
+          "neutral_tick": 1844,
+          "range_ticks": 777
+        },
+        "11": {
+          "end_tick": 3397,
+          "end_goal_tick": 3441,
+          "load_ma": 63,
+          "reason": "pulled 680 ticks without reaching 150 mA",
+          "neutral_tick": 2745,
+          "range_ticks": 652
+        },
+        "14": {
+          "end_tick": 3698,
+          "end_goal_tick": 3744,
+          "load_ma": 128,
+          "reason": "pulled 700 ticks without reaching 150 mA",
+          "neutral_tick": 3036,
+          "range_ticks": 662
+        },
+        "9": {
+          "end_tick": 2520,
+          "end_goal_tick": 2563,
+          "load_ma": 123,
+          "reason": "pulled 800 ticks without reaching 150 mA",
+          "neutral_tick": 1753,
+          "range_ticks": 767
+        },
+        "16": {
+          "end_tick": -99,
+          "end_goal_tick": -136,
+          "load_ma": -80,
+          "reason": "pulled 680 ticks without reaching 150 mA",
+          "neutral_tick": 551,
+          "range_ticks": 650
+        },
+        "19": {
+          "end_tick": 2167,
+          "end_goal_tick": 2125,
+          "load_ma": -97,
+          "reason": "pulled 700 ticks without reaching 150 mA",
+          "neutral_tick": 2833,
+          "range_ticks": 666
+        }
+      }
+    }
+  ],
+  "stopped": "jaw held over 400 mA for 2 s; backed off"
+}

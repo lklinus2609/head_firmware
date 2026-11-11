@@ -1,0 +1,171 @@
+{
+  "format": "head-tuning-record-1",
+  "started_utc": "2026-10-15T22:53:15.020938+00:00",
+  "current_limit_ma": 600,
+  "servos": {
+    "0": {
+      "branch": 0,
+      "neutral_tick": 3880,
+      "peak_current_ma": 15,
+      "marks": {},
+      "note": ""
+    },
+    "1": {
+      "branch": 0,
+      "neutral_tick": 1043,
+      "peak_current_ma": 9,
+      "marks": {},
+      "note": ""
+    },
+    "2": {
+      "branch": 0,
+      "neutral_tick": 2713,
+      "peak_current_ma": 17,
+      "marks": {},
+      "note": ""
+    },
+    "3": {
+      "branch": 0,
+      "neutral_tick": 1828,
+      "peak_current_ma": 20,
+      "marks": {},
+      "note": ""
+    },
+    "4": {
+      "branch": 0,
+      "neutral_tick": 2816,
+      "peak_current_ma": 0,
+      "marks": {},
+      "note": ""
+    },
+    "5": {
+      "branch": 2,
+      "neutral_tick": 2922,
+      "peak_current_ma": 0,
+      "marks": {},
+      "note": ""
+    },
+    "6": {
+      "branch": 2,
+      "neutral_tick": 1282,
+      "peak_current_ma": 0,
+      "marks": {},
+      "note": ""
+    },
+    "7": {
+      "branch": 2,
+      "neutral_tick": 4008,
+      "peak_current_ma": 27,
+      "marks": {
+        "neutral": {
+          "utc": "2026-10-15T22:53:57.734470+00:00",
+          "present_tick": 4009,
+          "goal_tick": 4008,
+          "current_ma": -4
+        }
+      },
+      "note": ""
+    },
+    "8": {
+      "branch": 2,
+      "neutral_tick": 1595,
+      "peak_current_ma": 29,
+      "marks": {
+        "neutral": {
+          "utc": "2026-10-15T23:03:47.665790+00:00",
+          "present_tick": 1589,
+          "goal_tick": 1595,
+          "current_ma": 21
+        }
+      },
+      "note": ""
+    },
+    "9": {
+      "branch": 2,
+      "neutral_tick": 2545,
+      "peak_current_ma": 15,
+      "marks": {},
+      "note": ""
+    },
+    "10": {
+      "branch": 1,
+      "neutral_tick": 2926,
+      "peak_current_ma": 19,
+      "marks": {
+        "neutral": {
+          "utc": "2026-10-15T23:03:50.524502+00:00",
+          "present_tick": 2932,
+          "goal_tick": 2926,
+          "current_ma": -18
+        }
+      },
+      "note": ""
+    },
+    "11": {
+      "branch": 1,
+      "neutral_tick": 1802,
+      "peak_current_ma": 6,
+      "marks": {},
+      "note": ""
+    },
+    "12": {
+      "branch": 1,
+      "neutral_tick": 2051,
+      "peak_current_ma": 5,
+      "marks": {},
+      "note": ""
+    },
+    "13": {
+      "branch": 1,
+      "neutral_tick": 814,
+      "peak_current_ma": 3,
+      "marks": {},
+      "note": ""
+    },
+    "14": {
+      "branch": 1,
+      "neutral_tick": 2896,
+      "peak_current_ma": 11,
+      "marks": {},
+      "note": ""
+    },
+    "15": {
+      "branch": 3,
+      "neutral_tick": 4015,
+      "peak_current_ma": 16,
+      "marks": {},
+      "note": ""
+    },
+    "16": {
+      "branch": 3,
+      "neutral_tick": 733,
+      "peak_current_ma": 11,
+      "marks": {},
+      "note": ""
+    },
+    "17": {
+      "branch": 3,
+      "neutral_tick": 2645,
+      "peak_current_ma": 4,
+      "marks": {},
+      "note": ""
+    },
+    "18": {
+      "branch": 3,
+      "neutral_tick": 3502,
+      "peak_current_ma": 5,
+      "marks": {},
+      "note": ""
+    },
+    "19": {
+      "branch": 3,
+      "neutral_tick": 3441,
+      "peak_current_ma": 23,
+      "marks": {},
+      "note": ""
+    }
+  },
+  "steps": [],
+  "faults": [],
+  "telemetry_file": "20261015T225315Z_tuning.telemetry.csv"
+}

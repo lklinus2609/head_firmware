@@ -1,0 +1,1052 @@
+{
+  "format": "head-coact-test-1",
+  "started_utc": "2026-10-20T21:58:30.551904+00:00",
+  "boxes": {
+    "jaw": "7",
+    "stages": "4",
+    "pull": "8+ 11+ 14+ 9+ 16- 19-",
+    "release": "8 9 11 14 16 19",
+    "preload_ma": "35",
+    "band_ma": "8",
+    "jaw_push_ma": "580",
+    "abort_ma": "280",
+    "max_travel_ticks": "2000",
+    "defer_on_open": "8 9"
+  },
+  "ranges": {
+    "up": 700,
+    "diag": 580,
+    "down": 800
+  },
+  "end_ma": 150,
+  "limit_ma": 650,
+  "caps": {
+    "0": 300,
+    "1": 300,
+    "2": 300,
+    "3": 300,
+    "4": 300,
+    "5": 300,
+    "6": 300,
+    "7": 650,
+    "8": 300,
+    "9": 300,
+    "10": 300,
+    "11": 300,
+    "12": 300,
+    "13": 300,
+    "14": 300,
+    "15": 300,
+    "16": 300,
+    "17": 300,
+    "18": 300,
+    "19": 300
+  },
+  "results": [
+    {
+      "weights": {
+        "up": 1.0,
+        "diag": 0.0
+      },
+      "activation": 1.0,
+      "stopped_by": "full range",
+      "reason": null,
+      "followers_at_cap": [],
+      "lines": {
+        "8": {
+          "role": "down",
+          "driver": false,
+          "neutral_tick": 5255,
+          "tick": 5256,
+          "moved_ticks": 1,
+          "load_ma": 34,
+          "peak_ma": null
+        },
+        "11": {
+          "role": "diag",
+          "driver": false,
+          "neutral_tick": 2812,
+          "tick": 3009,
+          "moved_ticks": 197,
+          "load_ma": 19,
+          "peak_ma": null
+        },
+        "14": {
+          "role": "up",
+          "driver": true,
+          "neutral_tick": 3282,
+          "tick": 3951,
+          "moved_ticks": 669,
+          "load_ma": 73,
+          "peak_ma": 117
+        }
+      },
+      "side": "right",
+      "jaw_target": 4000,
+      "jaw_tick": 4005
+    },
+    {
+      "weights": {
+        "up": 1.0,
+        "diag": 0.5
+      },
+      "activation": 1.0,
+      "stopped_by": "full range",
+      "reason": null,
+      "followers_at_cap": [],
+      "lines": {
+        "8": {
+          "role": "down",
+          "driver": false,
+          "neutral_tick": 5257,
+          "tick": 5285,
+          "moved_ticks": 28,
+          "load_ma": 38,
+          "peak_ma": null
+        },
+        "11": {
+          "role": "diag",
+          "driver": true,
+          "neutral_tick": 2814,
+          "tick": 3095,
+          "moved_ticks": 281,
+          "load_ma": 27,
+          "peak_ma": 48
+        },
+        "14": {
+          "role": "up",
+          "driver": true,
+          "neutral_tick": 3291,
+          "tick": 3955,
+          "moved_ticks": 664,
+          "load_ma": 79,
+          "peak_ma": 112
+        }
+      },
+      "side": "right",
+      "jaw_target": 4000,
+      "jaw_tick": 4006
+    },
+    {
+      "weights": {
+        "up": 1.0,
+        "diag": 1.0
+      },
+      "activation": 1.0,
+      "stopped_by": "full range",
+      "reason": null,
+      "followers_at_cap": [],
+      "lines": {
+        "8": {
+          "role": "down",
+          "driver": false,
+          "neutral_tick": 5258,
+          "tick": 5306,
+          "moved_ticks": 48,
+          "load_ma": 35,
+          "peak_ma": null
+        },
+        "11": {
+          "role": "diag",
+          "driver": true,
+          "neutral_tick": 2814,
+          "tick": 3372,
+          "moved_ticks": 558,
+          "load_ma": 64,
+          "peak_ma": 89
+        },
+        "14": {
+          "role": "up",
+          "driver": true,
+          "neutral_tick": 3294,
+          "tick": 3959,
+          "moved_ticks": 665,
+          "load_ma": 75,
+          "peak_ma": 101
+        }
+      },
+      "side": "right",
+      "jaw_target": 4000,
+      "jaw_tick": 4008
+    },
+    {
+      "weights": {
+        "up": 0.5,
+        "diag": 1.0
+      },
+      "activation": 1.0,
+      "stopped_by": "full range",
+      "reason": null,
+      "followers_at_cap": [],
+      "lines": {
+        "8": {
+          "role": "down",
+          "driver": false,
+          "neutral_tick": 5258,
+          "tick": 5285,
+          "moved_ticks": 27,
+          "load_ma": 31,
+          "peak_ma": null
+        },
+        "11": {
+          "role": "diag",
+          "driver": true,
+          "neutral_tick": 2814,
+          "tick": 3371,
+          "moved_ticks": 557,
+          "load_ma": 81,
+          "peak_ma": 82
+        },
+        "14": {
+          "role": "up",
+          "driver": true,
+          "neutral_tick": 3294,
+          "tick": 3623,
+          "moved_ticks": 329,
+          "load_ma": 49,
+          "peak_ma": 61
+        }
+      },
+      "side": "right",
+      "jaw_target": 4000,
+      "jaw_tick": 4007
+    },
+    {
+      "weights": {
+        "up": 0.0,
+        "diag": 1.0
+      },
+      "activation": 1.0,
+      "stopped_by": "full range",
+      "reason": null,
+      "followers_at_cap": [],
+      "lines": {
+        "8": {
+          "role": "down",
+          "driver": false,
+          "neutral_tick": 5259,
+          "tick": 5326,
+          "moved_ticks": 67,
+          "load_ma": 31,
+          "peak_ma": null
+        },
+        "11": {
+          "role": "diag",
+          "driver": true,
+          "neutral_tick": 2823,
+          "tick": 3375,
+          "moved_ticks": 552,
+          "load_ma": 62,
+          "peak_ma": 77
+        },
+        "14": {
+          "role": "up",
+          "driver": false,
+          "neutral_tick": 3292,
+          "tick": 3491,
+          "moved_ticks": 199,
+          "load_ma": -5,
+          "peak_ma": null
+        }
+      },
+      "side": "right",
+      "jaw_target": 4000,
+      "jaw_tick": 4007
+    },
+    {
+      "weights": {
+        "down": 1.0
+      },
+      "activation": 1.0,
+      "stopped_by": "full range",
+      "reason": null,
+      "followers_at_cap": [],
+      "lines": {
+        "8": {
+          "role": "down",
+          "driver": true,
+          "neutral_tick": 5266,
+          "tick": 6039,
+          "moved_ticks": 773,
+          "load_ma": 52,
+          "peak_ma": 68
+        },
+        "11": {
+          "role": "diag",
+          "driver": false,
+          "neutral_tick": 2819,
+          "tick": 2903,
+          "moved_ticks": 84,
+          "load_ma": 31,
+          "peak_ma": null
+        },
+        "14": {
+          "role": "up",
+          "driver": false,
+          "neutral_tick": 3293,
+          "tick": 3360,
+          "moved_ticks": 67,
+          "load_ma": 35,
+          "peak_ma": null
+        }
+      },
+      "side": "right",
+      "jaw_target": 4000,
+      "jaw_tick": 4008
+    },
+    {
+      "weights": {
+        "up": 1.0,
+        "diag": 0.0
+      },
+      "activation": 1.0,
+      "stopped_by": "full range",
+      "reason": null,
+      "followers_at_cap": [],
+      "lines": {
+        "9": {
+          "role": "down",
+          "driver": false,
+          "neutral_tick": 1727,
+          "tick": 1727,
+          "moved_ticks": 0,
+          "load_ma": 35,
+          "peak_ma": null
+        },
+        "16": {
+          "role": "diag",
+          "driver": false,
+          "neutral_tick": 334,
+          "tick": 142,
+          "moved_ticks": 192,
+          "load_ma": -23,
+          "peak_ma": null
+        },
+        "19": {
+          "role": "up",
+          "driver": true,
+          "neutral_tick": 2641,
+          "tick": 1975,
+          "moved_ticks": 666,
+          "load_ma": -111,
+          "peak_ma": 111
+        }
+      },
+      "side": "left",
+      "jaw_target": 4000,
+      "jaw_tick": 4009
+    },
+    {
+      "weights": {
+        "up": 1.0,
+        "diag": 0.5
+      },
+      "activation": 1.0,
+      "stopped_by": "full range",
+      "reason": null,
+      "followers_at_cap": [],
+      "lines": {
+        "9": {
+          "role": "down",
+          "driver": false,
+          "neutral_tick": 1727,
+          "tick": 1727,
+          "moved_ticks": 0,
+          "load_ma": 38,
+          "peak_ma": null
+        },
+        "16": {
+          "role": "diag",
+          "driver": true,
+          "neutral_tick": 331,
+          "tick": 51,
+          "moved_ticks": 280,
+          "load_ma": -41,
+          "peak_ma": 48
+        },
+        "19": {
+          "role": "up",
+          "driver": true,
+          "neutral_tick": 2633,
+          "tick": 1973,
+          "moved_ticks": 660,
+          "load_ma": -99,
+          "peak_ma": 101
+        }
+      },
+      "side": "left",
+      "jaw_target": 4000,
+      "jaw_tick": 4009
+    },
+    {
+      "weights": {
+        "up": 1.0,
+        "diag": 1.0
+      },
+      "activation": 1.0,
+      "stopped_by": "full range",
+      "reason": null,
+      "followers_at_cap": [],
+      "lines": {
+        "9": {
+          "role": "down",
+          "driver": false,
+          "neutral_tick": 1727,
+          "tick": 1727,
+          "moved_ticks": 0,
+          "load_ma": 35,
+          "peak_ma": null
+        },
+        "16": {
+          "role": "diag",
+          "driver": true,
+          "neutral_tick": 331,
+          "tick": -225,
+          "moved_ticks": 556,
+          "load_ma": -82,
+          "peak_ma": 88
+        },
+        "19": {
+          "role": "up",
+          "driver": true,
+          "neutral_tick": 2632,
+          "tick": 1976,
+          "moved_ticks": 656,
+          "load_ma": -119,
+          "peak_ma": 119
+        }
+      },
+      "side": "left",
+      "jaw_target": 4000,
+      "jaw_tick": 4010
+    },
+    {
+      "weights": {
+        "up": 0.5,
+        "diag": 1.0
+      },
+      "activation": 1.0,
+      "stopped_by": "full range",
+      "reason": null,
+      "followers_at_cap": [],
+      "lines": {
+        "9": {
+          "role": "down",
+          "driver": false,
+          "neutral_tick": 1727,
+          "tick": 1727,
+          "moved_ticks": 0,
+          "load_ma": 35,
+          "peak_ma": null
+        },
+        "16": {
+          "role": "diag",
+          "driver": true,
+          "neutral_tick": 331,
+          "tick": -235,
+          "moved_ticks": 566,
+          "load_ma": -45,
+          "peak_ma": 63
+        },
+        "19": {
+          "role": "up",
+          "driver": true,
+          "neutral_tick": 2631,
+          "tick": 2299,
+          "moved_ticks": 332,
+          "load_ma": -45,
+          "peak_ma": 54
+        }
+      },
+      "side": "left",
+      "jaw_target": 4000,
+      "jaw_tick": 4011
+    },
+    {
+      "weights": {
+        "up": 0.0,
+        "diag": 1.0
+      },
+      "activation": 1.0,
+      "stopped_by": "full range",
+      "reason": null,
+      "followers_at_cap": [],
+      "lines": {
+        "9": {
+          "role": "down",
+          "driver": false,
+          "neutral_tick": 1727,
+          "tick": 1727,
+          "moved_ticks": 0,
+          "load_ma": 34,
+          "peak_ma": null
+        },
+        "16": {
+          "role": "diag",
+          "driver": true,
+          "neutral_tick": 331,
+          "tick": -237,
+          "moved_ticks": 568,
+          "load_ma": -39,
+          "peak_ma": 60
+        },
+        "19": {
+          "role": "up",
+          "driver": false,
+          "neutral_tick": 2631,
+          "tick": 2430,
+          "moved_ticks": 201,
+          "load_ma": -34,
+          "peak_ma": null
+        }
+      },
+      "side": "left",
+      "jaw_target": 4000,
+      "jaw_tick": 4010
+    },
+    {
+      "weights": {
+        "down": 1.0
+      },
+      "activation": 0.41,
+      "stopped_by": "load drop",
+      "reason": null,
+      "followers_at_cap": [],
+      "lines": {
+        "9": {
+          "role": "down",
+          "driver": true,
+          "neutral_tick": 1727,
+          "tick": 2035,
+          "moved_ticks": 308,
+          "load_ma": 31,
+          "peak_ma": 96
+        },
+        "16": {
+          "role": "diag",
+          "driver": false,
+          "neutral_tick": 331,
+          "tick": 280,
+          "moved_ticks": 51,
+          "load_ma": -33,
+          "peak_ma": null
+        },
+        "19": {
+          "role": "up",
+          "driver": false,
+          "neutral_tick": 2634,
+          "tick": 2568,
+          "moved_ticks": 66,
+          "load_ma": -40,
+          "peak_ma": null
+        }
+      },
+      "side": "left",
+      "jaw_target": 4000,
+      "jaw_tick": 4010
+    },
+    {
+      "weights": {
+        "up": 1.0,
+        "diag": 0.0
+      },
+      "activation": 1.0,
+      "stopped_by": "full range",
+      "reason": null,
+      "followers_at_cap": [],
+      "lines": {
+        "8": {
+          "role": "down",
+          "driver": false,
+          "neutral_tick": 5416,
+          "tick": 5416,
+          "moved_ticks": 0,
+          "load_ma": 35,
+          "peak_ma": null
+        },
+        "11": {
+          "role": "diag",
+          "driver": false,
+          "neutral_tick": 2887,
+          "tick": 3129,
+          "moved_ticks": 242,
+          "load_ma": 14,
+          "peak_ma": null
+        },
+        "14": {
+          "role": "up",
+          "driver": true,
+          "neutral_tick": 3233,
+          "tick": 3895,
+          "moved_ticks": 662,
+          "load_ma": 117,
+          "peak_ma": 139
+        }
+      },
+      "side": "right",
+      "jaw_target": 3880,
+      "jaw_tick": 3884
+    },
+    {
+      "weights": {
+        "up": 1.0,
+        "diag": 0.5
+      },
+      "activation": 1.0,
+      "stopped_by": "full range",
+      "reason": null,
+      "followers_at_cap": [],
+      "lines": {
+        "8": {
+          "role": "down",
+          "driver": false,
+          "neutral_tick": 5416,
+          "tick": 5424,
+          "moved_ticks": 8,
+          "load_ma": 35,
+          "peak_ma": null
+        },
+        "11": {
+          "role": "diag",
+          "driver": true,
+          "neutral_tick": 2889,
+          "tick": 3172,
+          "moved_ticks": 283,
+          "load_ma": 35,
+          "peak_ma": 47
+        },
+        "14": {
+          "role": "up",
+          "driver": true,
+          "neutral_tick": 3244,
+          "tick": 3899,
+          "moved_ticks": 655,
+          "load_ma": 125,
+          "peak_ma": 128
+        }
+      },
+      "side": "right",
+      "jaw_target": 3880,
+      "jaw_tick": 3884
+    },
+    {
+      "weights": {
+        "up": 1.0,
+        "diag": 1.0
+      },
+      "activation": 1.0,
+      "stopped_by": "full range",
+      "reason": null,
+      "followers_at_cap": [],
+      "lines": {
+        "8": {
+          "role": "down",
+          "driver": false,
+          "neutral_tick": 5419,
+          "tick": 5439,
+          "moved_ticks": 20,
+          "load_ma": 35,
+          "peak_ma": null
+        },
+        "11": {
+          "role": "diag",
+          "driver": true,
+          "neutral_tick": 2889,
+          "tick": 3449,
+          "moved_ticks": 560,
+          "load_ma": 72,
+          "peak_ma": 84
+        },
+        "14": {
+          "role": "up",
+          "driver": true,
+          "neutral_tick": 3244,
+          "tick": 3902,
+          "moved_ticks": 658,
+          "load_ma": 108,
+          "peak_ma": 124
+        }
+      },
+      "side": "right",
+      "jaw_target": 3880,
+      "jaw_tick": 3884
+    },
+    {
+      "weights": {
+        "up": 0.5,
+        "diag": 1.0
+      },
+      "activation": 1.0,
+      "stopped_by": "full range",
+      "reason": null,
+      "followers_at_cap": [],
+      "lines": {
+        "8": {
+          "role": "down",
+          "driver": false,
+          "neutral_tick": 5418,
+          "tick": 5450,
+          "moved_ticks": 32,
+          "load_ma": 35,
+          "peak_ma": null
+        },
+        "11": {
+          "role": "diag",
+          "driver": true,
+          "neutral_tick": 2893,
+          "tick": 3449,
+          "moved_ticks": 556,
+          "load_ma": 73,
+          "peak_ma": 73
+        },
+        "14": {
+          "role": "up",
+          "driver": true,
+          "neutral_tick": 3245,
+          "tick": 3577,
+          "moved_ticks": 332,
+          "load_ma": 37,
+          "peak_ma": 61
+        }
+      },
+      "side": "right",
+      "jaw_target": 3880,
+      "jaw_tick": 3884
+    },
+    {
+      "weights": {
+        "up": 0.0,
+        "diag": 1.0
+      },
+      "activation": 1.0,
+      "stopped_by": "full range",
+      "reason": null,
+      "followers_at_cap": [],
+      "lines": {
+        "8": {
+          "role": "down",
+          "driver": false,
+          "neutral_tick": 5421,
+          "tick": 5466,
+          "moved_ticks": 45,
+          "load_ma": 35,
+          "peak_ma": null
+        },
+        "11": {
+          "role": "diag",
+          "driver": true,
+          "neutral_tick": 2897,
+          "tick": 3453,
+          "moved_ticks": 556,
+          "load_ma": 50,
+          "peak_ma": 80
+        },
+        "14": {
+          "role": "up",
+          "driver": false,
+          "neutral_tick": 3242,
+          "tick": 3452,
+          "moved_ticks": 210,
+          "load_ma": 32,
+          "peak_ma": null
+        }
+      },
+      "side": "right",
+      "jaw_target": 3880,
+      "jaw_tick": 3883
+    },
+    {
+      "weights": {
+        "down": 1.0
+      },
+      "activation": 1.0,
+      "stopped_by": "full range",
+      "reason": null,
+      "followers_at_cap": [],
+      "lines": {
+        "8": {
+          "role": "down",
+          "driver": true,
+          "neutral_tick": 5424,
+          "tick": 6218,
+          "moved_ticks": 794,
+          "load_ma": -17,
+          "peak_ma": 55
+        },
+        "11": {
+          "role": "diag",
+          "driver": false,
+          "neutral_tick": 2897,
+          "tick": 2993,
+          "moved_ticks": 96,
+          "load_ma": 33,
+          "peak_ma": null
+        },
+        "14": {
+          "role": "up",
+          "driver": false,
+          "neutral_tick": 3241,
+          "tick": 3340,
+          "moved_ticks": 99,
+          "load_ma": 30,
+          "peak_ma": null
+        }
+      },
+      "side": "right",
+      "jaw_target": 3880,
+      "jaw_tick": 3883
+    },
+    {
+      "weights": {
+        "up": 1.0,
+        "diag": 0.0
+      },
+      "activation": 1.0,
+      "stopped_by": "full range",
+      "reason": null,
+      "followers_at_cap": [],
+      "lines": {
+        "9": {
+          "role": "down",
+          "driver": false,
+          "neutral_tick": 1741,
+          "tick": 1741,
+          "moved_ticks": 0,
+          "load_ma": 35,
+          "peak_ma": null
+        },
+        "16": {
+          "role": "diag",
+          "driver": false,
+          "neutral_tick": 500,
+          "tick": 259,
+          "moved_ticks": 241,
+          "load_ma": -17,
+          "peak_ma": null
+        },
+        "19": {
+          "role": "up",
+          "driver": true,
+          "neutral_tick": 2761,
+          "tick": 2095,
+          "moved_ticks": 666,
+          "load_ma": -83,
+          "peak_ma": 121
+        }
+      },
+      "side": "left",
+      "jaw_target": 3880,
+      "jaw_tick": 3884
+    },
+    {
+      "weights": {
+        "up": 1.0,
+        "diag": 0.5
+      },
+      "activation": 1.0,
+      "stopped_by": "full range",
+      "reason": null,
+      "followers_at_cap": [],
+      "lines": {
+        "9": {
+          "role": "down",
+          "driver": false,
+          "neutral_tick": 1741,
+          "tick": 1741,
+          "moved_ticks": 0,
+          "load_ma": 35,
+          "peak_ma": null
+        },
+        "16": {
+          "role": "diag",
+          "driver": true,
+          "neutral_tick": 494,
+          "tick": 212,
+          "moved_ticks": 282,
+          "load_ma": -23,
+          "peak_ma": 38
+        },
+        "19": {
+          "role": "up",
+          "driver": true,
+          "neutral_tick": 2753,
+          "tick": 2086,
+          "moved_ticks": 667,
+          "load_ma": -69,
+          "peak_ma": 96
+        }
+      },
+      "side": "left",
+      "jaw_target": 3880,
+      "jaw_tick": 3884
+    },
+    {
+      "weights": {
+        "up": 1.0,
+        "diag": 1.0
+      },
+      "activation": 1.0,
+      "stopped_by": "full range",
+      "reason": null,
+      "followers_at_cap": [],
+      "lines": {
+        "9": {
+          "role": "down",
+          "driver": false,
+          "neutral_tick": 1741,
+          "tick": 1741,
+          "moved_ticks": 0,
+          "load_ma": 35,
+          "peak_ma": null
+        },
+        "16": {
+          "role": "diag",
+          "driver": true,
+          "neutral_tick": 497,
+          "tick": -68,
+          "moved_ticks": 565,
+          "load_ma": -48,
+          "peak_ma": 64
+        },
+        "19": {
+          "role": "up",
+          "driver": true,
+          "neutral_tick": 2752,
+          "tick": 2086,
+          "moved_ticks": 666,
+          "load_ma": -78,
+          "peak_ma": 93
+        }
+      },
+      "side": "left",
+      "jaw_target": 3880,
+      "jaw_tick": 3884
+    },
+    {
+      "weights": {
+        "up": 0.5,
+        "diag": 1.0
+      },
+      "activation": 1.0,
+      "stopped_by": "full range",
+      "reason": null,
+      "followers_at_cap": [],
+      "lines": {
+        "9": {
+          "role": "down",
+          "driver": false,
+          "neutral_tick": 1741,
+          "tick": 1741,
+          "moved_ticks": 0,
+          "load_ma": 35,
+          "peak_ma": null
+        },
+        "16": {
+          "role": "diag",
+          "driver": true,
+          "neutral_tick": 497,
+          "tick": -72,
+          "moved_ticks": 569,
+          "load_ma": -33,
+          "peak_ma": 58
+        },
+        "19": {
+          "role": "up",
+          "driver": true,
+          "neutral_tick": 2751,
+          "tick": 2419,
+          "moved_ticks": 332,
+          "load_ma": -30,
+          "peak_ma": 54
+        }
+      },
+      "side": "left",
+      "jaw_target": 3880,
+      "jaw_tick": 3883
+    },
+    {
+      "weights": {
+        "up": 0.0,
+        "diag": 1.0
+      },
+      "activation": 1.0,
+      "stopped_by": "full range",
+      "reason": null,
+      "followers_at_cap": [],
+      "lines": {
+        "9": {
+          "role": "down",
+          "driver": false,
+          "neutral_tick": 1741,
+          "tick": 1741,
+          "moved_ticks": 0,
+          "load_ma": 35,
+          "peak_ma": null
+        },
+        "16": {
+          "role": "diag",
+          "driver": true,
+          "neutral_tick": 496,
+          "tick": -69,
+          "moved_ticks": 565,
+          "load_ma": -50,
+          "peak_ma": 64
+        },
+        "19": {
+          "role": "up",
+          "driver": false,
+          "neutral_tick": 2752,
+          "tick": 2519,
+          "moved_ticks": 233,
+          "load_ma": -28,
+          "peak_ma": null
+        }
+      },
+      "side": "left",
+      "jaw_target": 3880,
+      "jaw_tick": 3883
+    },
+    {
+      "weights": {
+        "down": 1.0
+      },
+      "activation": 0.47,
+      "stopped_by": "load drop",
+      "reason": null,
+      "followers_at_cap": [],
+      "lines": {
+        "9": {
+          "role": "down",
+          "driver": true,
+          "neutral_tick": 1741,
+          "tick": 2096,
+          "moved_ticks": 355,
+          "load_ma": 51,
+          "peak_ma": 103
+        },
+        "16": {
+          "role": "diag",
+          "driver": false,
+          "neutral_tick": 497,
+          "tick": 413,
+          "moved_ticks": 84,
+          "load_ma": -38,
+          "peak_ma": null
+        },
+        "19": {
+          "role": "up",
+          "driver": false,
+          "neutral_tick": 2752,
+          "tick": 2675,
+          "moved_ticks": 77,
+          "load_ma": -38,
+          "peak_ma": null
+        }
+      },
+      "side": "left",
+      "jaw_target": 3880,
+      "jaw_tick": 3883
+    }
+  ],
+  "stopped": null
+}

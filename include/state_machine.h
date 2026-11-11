@@ -17,10 +17,25 @@ bool head_state_confirm_maintenance_servo(struct head_runtime *runtime,
                                           struct head_calibration *calibration,
                                           uint8_t servo_index);
 bool head_state_request_enable(struct head_runtime *runtime);
+/* 0, -EPERM (wrong state, profile invalid, or motion preparation not
+ * allowed) or -ERANGE (an active servo is outside its profile range). */
+int head_state_request_enable_at_present_pose(struct head_runtime *runtime,
+                                              const struct head_calibration *calibration);
 bool head_state_request_proprioception(struct head_runtime *runtime,
                                        uint32_t now_ms);
 bool head_state_request_routing(struct head_runtime *runtime,
                                 const struct head_calibration *calibration);
+bool head_state_request_tuning(struct head_runtime *runtime,
+                               const struct head_calibration *calibration,
+                               uint16_t current_limit_ma);
+/* One servo's tuning Goal Current: the requested limit, but never more than
+ * that servo's own operating_current_ma. */
+uint16_t head_state_tuning_limit_ma(const struct head_runtime *runtime,
+                                    const struct head_calibration *calibration,
+                                    uint8_t servo_index);
+int head_state_tuning_step(struct head_runtime *runtime,
+                           const struct head_calibration *calibration,
+                           uint8_t servo_index, int8_t step_ticks, uint32_t now_ms);
 bool head_state_torque_may_be_on(const struct head_runtime *runtime);
 bool head_state_torque_never_commanded_on(const struct head_runtime *runtime);
 bool head_state_torque_verified_on(const struct head_runtime *runtime);

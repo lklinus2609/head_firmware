@@ -1,0 +1,536 @@
+{
+  "format": "head-workspace-map-2",
+  "sources": [
+    "tuning_runs/20261020T210413Z_ranges.json",
+    "tuning_runs/20261020T211427Z_ranges.json"
+  ],
+  "how": "Per jaw slice: every line slacked 300 ticks, jaw moved, every line pulled back to 35 mA from below (neutral), then each line pulled to 150 mA or its pull limit (end). Lines capped at 300 mA, jaw at 650 mA; skin on. Two runs, 2026-10-20 21:04Z and 21:14Z.",
+  "definition": {
+    "lines": "Each session, find every line's neutral by pretension (35 mA from below) with the jaw closed; then a line may go from its neutral to neutral + range_ticks in its pull direction. Absolute neutrals moved by about +-80..210 ticks between the two runs (friction; 8 and 9 also slip on their horns), so absolute ticks are not reused. Diag ranges (11, 16) cut to 580 on 2026-10-20 (from the measured 680): the magnets lost grip in some cases.",
+    "range_ticks": {
+      "8": 300,
+      "9": 300,
+      "11": 580,
+      "16": 580,
+      "14": 700,
+      "19": 700
+    },
+    "pull_directions": {
+      "8": 1,
+      "11": 1,
+      "14": 1,
+      "9": 1,
+      "16": -1,
+      "19": -1
+    },
+    "jaw": {
+      "closed_tick": 4000,
+      "open_hold_tick": 3880,
+      "open_edge_tick": 3850,
+      "note": "Opens toward lower ticks. With every line at neutral the jaw held -81/-264 mA at 3880 (runs 1/2) and -401 mA at 3852 (run 2; run 1 tripped the 400 mA / 2 s guard at 3855). With every line loose it peaked to about 3840 at ~530 mA."
+    },
+    "combined": "Combined-pull test 20261020T215830Z_coact.json: up and diag may drive together in any mix to their full ranges (jaw 4000 and 3880, both sides) while down follows at the preload. Down never drives together with up or diag (operator rule). Down limited to 300 ticks: line 9 lost grip at 308-355 ticks pulled alone; 8 slips and gives no usable data; 8 set equal for symmetry.",
+    "action_space": "Per side a 2-D point (d, v): d in [0,1] diag; v in [-1,1]: v>=0 up=v and diag=d drive, down follows; v<0 down=-v drives, up and diag follow. Jaw j in [0,1] from closed to the open hold limit. Implemented in head_ros/workspace_guard.py."
+  },
+  "unreliable": {
+    "8": "line 8 never pulled tight (5-46 mA at 800 ticks) and its neutral moved up to 1800 ticks: horn slip (design flaw); its range is not real yet."
+  },
+  "runs": [
+    {
+      "source": "tuning_runs/20261020T210413Z_ranges.json",
+      "slices": [
+        {
+          "jaw_tick": 4000,
+          "jaw_ma_at_neutral": 7,
+          "lines": {
+            "8": {
+              "name": "R down",
+              "neutral_tick": 2297,
+              "end_tick": 3083,
+              "range_ticks": 786,
+              "end_ma": 6,
+              "end_by": "pull limit"
+            },
+            "11": {
+              "name": "R diag",
+              "neutral_tick": 2658,
+              "end_tick": 3304,
+              "range_ticks": 646,
+              "end_ma": 131,
+              "end_by": "pull limit"
+            },
+            "14": {
+              "name": "R up",
+              "neutral_tick": 3124,
+              "end_tick": 3788,
+              "range_ticks": 664,
+              "end_ma": 109,
+              "end_by": "pull limit"
+            },
+            "9": {
+              "name": "L down",
+              "neutral_tick": 2159,
+              "end_tick": 2652,
+              "range_ticks": 493,
+              "end_ma": 159,
+              "end_by": "load"
+            },
+            "16": {
+              "name": "L diag",
+              "neutral_tick": 545,
+              "end_tick": -110,
+              "range_ticks": 655,
+              "end_ma": -60,
+              "end_by": "pull limit"
+            },
+            "19": {
+              "name": "L up",
+              "neutral_tick": 2845,
+              "end_tick": 2173,
+              "range_ticks": 672,
+              "end_ma": -108,
+              "end_by": "pull limit"
+            }
+          }
+        },
+        {
+          "jaw_tick": 3959,
+          "jaw_ma_at_neutral": -95,
+          "lines": {
+            "8": {
+              "name": "R down",
+              "neutral_tick": 2267,
+              "end_tick": 3049,
+              "range_ticks": 782,
+              "end_ma": 9,
+              "end_by": "pull limit"
+            },
+            "11": {
+              "name": "R diag",
+              "neutral_tick": 2655,
+              "end_tick": 3293,
+              "range_ticks": 638,
+              "end_ma": 158,
+              "end_by": "load"
+            },
+            "14": {
+              "name": "R up",
+              "neutral_tick": 3090,
+              "end_tick": 3724,
+              "range_ticks": 634,
+              "end_ma": 154,
+              "end_by": "load"
+            },
+            "9": {
+              "name": "L down",
+              "neutral_tick": 1889,
+              "end_tick": 2620,
+              "range_ticks": 731,
+              "end_ma": 154,
+              "end_by": "load"
+            },
+            "16": {
+              "name": "L diag",
+              "neutral_tick": 492,
+              "end_tick": -153,
+              "range_ticks": 645,
+              "end_ma": -94,
+              "end_by": "pull limit"
+            },
+            "19": {
+              "name": "L up",
+              "neutral_tick": 2762,
+              "end_tick": 2095,
+              "range_ticks": 667,
+              "end_ma": -96,
+              "end_by": "pull limit"
+            }
+          }
+        },
+        {
+          "jaw_tick": 3922,
+          "jaw_ma_at_neutral": -261,
+          "lines": {
+            "8": {
+              "name": "R down",
+              "neutral_tick": 2033,
+              "end_tick": 2805,
+              "range_ticks": 772,
+              "end_ma": 36,
+              "end_by": "pull limit"
+            },
+            "11": {
+              "name": "R diag",
+              "neutral_tick": 2643,
+              "end_tick": 3295,
+              "range_ticks": 652,
+              "end_ma": 83,
+              "end_by": "pull limit"
+            },
+            "14": {
+              "name": "R up",
+              "neutral_tick": 3048,
+              "end_tick": 3710,
+              "range_ticks": 662,
+              "end_ma": 124,
+              "end_by": "pull limit"
+            },
+            "9": {
+              "name": "L down",
+              "neutral_tick": 1757,
+              "end_tick": 2529,
+              "range_ticks": 772,
+              "end_ma": 118,
+              "end_by": "pull limit"
+            },
+            "16": {
+              "name": "L diag",
+              "neutral_tick": 494,
+              "end_tick": -156,
+              "range_ticks": 650,
+              "end_ma": -75,
+              "end_by": "pull limit"
+            },
+            "19": {
+              "name": "L up",
+              "neutral_tick": 2759,
+              "end_tick": 2099,
+              "range_ticks": 660,
+              "end_ma": -107,
+              "end_by": "pull limit"
+            }
+          }
+        },
+        {
+          "jaw_tick": 3881,
+          "jaw_ma_at_neutral": -81,
+          "lines": {
+            "8": {
+              "name": "R down",
+              "neutral_tick": 1844,
+              "end_tick": 2621,
+              "range_ticks": 777,
+              "end_ma": 29,
+              "end_by": "pull limit"
+            },
+            "11": {
+              "name": "R diag",
+              "neutral_tick": 2745,
+              "end_tick": 3397,
+              "range_ticks": 652,
+              "end_ma": 63,
+              "end_by": "pull limit"
+            },
+            "14": {
+              "name": "R up",
+              "neutral_tick": 3036,
+              "end_tick": 3698,
+              "range_ticks": 662,
+              "end_ma": 128,
+              "end_by": "pull limit"
+            },
+            "9": {
+              "name": "L down",
+              "neutral_tick": 1753,
+              "end_tick": 2520,
+              "range_ticks": 767,
+              "end_ma": 123,
+              "end_by": "pull limit"
+            },
+            "16": {
+              "name": "L diag",
+              "neutral_tick": 551,
+              "end_tick": -99,
+              "range_ticks": 650,
+              "end_ma": -80,
+              "end_by": "pull limit"
+            },
+            "19": {
+              "name": "L up",
+              "neutral_tick": 2833,
+              "end_tick": 2167,
+              "range_ticks": 666,
+              "end_ma": -97,
+              "end_by": "pull limit"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "source": "tuning_runs/20261020T211427Z_ranges.json",
+      "slices": [
+        {
+          "jaw_tick": 4000,
+          "jaw_ma_at_neutral": 42,
+          "lines": {
+            "8": {
+              "name": "R down",
+              "neutral_tick": 2293,
+              "end_tick": 3082,
+              "range_ticks": 789,
+              "end_ma": 26,
+              "end_by": "pull limit"
+            },
+            "11": {
+              "name": "R diag",
+              "neutral_tick": 2738,
+              "end_tick": 3321,
+              "range_ticks": 583,
+              "end_ma": 154,
+              "end_by": "load"
+            },
+            "14": {
+              "name": "R up",
+              "neutral_tick": 3145,
+              "end_tick": 3806,
+              "range_ticks": 661,
+              "end_ma": 147,
+              "end_by": "pull limit"
+            },
+            "9": {
+              "name": "L down",
+              "neutral_tick": 1734,
+              "end_tick": 2500,
+              "range_ticks": 766,
+              "end_ma": 93,
+              "end_by": "pull limit"
+            },
+            "16": {
+              "name": "L diag",
+              "neutral_tick": 413,
+              "end_tick": -240,
+              "range_ticks": 653,
+              "end_ma": -69,
+              "end_by": "pull limit"
+            },
+            "19": {
+              "name": "L up",
+              "neutral_tick": 2708,
+              "end_tick": 2047,
+              "range_ticks": 661,
+              "end_ma": -90,
+              "end_by": "pull limit"
+            }
+          }
+        },
+        {
+          "jaw_tick": 3960,
+          "jaw_ma_at_neutral": -29,
+          "lines": {
+            "8": {
+              "name": "R down",
+              "neutral_tick": 2393,
+              "end_tick": 3172,
+              "range_ticks": 779,
+              "end_ma": 20,
+              "end_by": "pull limit"
+            },
+            "11": {
+              "name": "R diag",
+              "neutral_tick": 2713,
+              "end_tick": 3359,
+              "range_ticks": 646,
+              "end_ma": 98,
+              "end_by": "pull limit"
+            },
+            "14": {
+              "name": "R up",
+              "neutral_tick": 3097,
+              "end_tick": 3760,
+              "range_ticks": 663,
+              "end_ma": 75,
+              "end_by": "pull limit"
+            },
+            "9": {
+              "name": "L down",
+              "neutral_tick": 1749,
+              "end_tick": 2522,
+              "range_ticks": 773,
+              "end_ma": 123,
+              "end_by": "pull limit"
+            },
+            "16": {
+              "name": "L diag",
+              "neutral_tick": 390,
+              "end_tick": -258,
+              "range_ticks": 648,
+              "end_ma": -48,
+              "end_by": "pull limit"
+            },
+            "19": {
+              "name": "L up",
+              "neutral_tick": 2685,
+              "end_tick": 2013,
+              "range_ticks": 672,
+              "end_ma": -104,
+              "end_by": "pull limit"
+            }
+          }
+        },
+        {
+          "jaw_tick": 3922,
+          "jaw_ma_at_neutral": -138,
+          "lines": {
+            "8": {
+              "name": "R down",
+              "neutral_tick": 3645,
+              "end_tick": 4429,
+              "range_ticks": 784,
+              "end_ma": 46,
+              "end_by": "pull limit"
+            },
+            "11": {
+              "name": "R diag",
+              "neutral_tick": 2853,
+              "end_tick": 3499,
+              "range_ticks": 646,
+              "end_ma": 66,
+              "end_by": "pull limit"
+            },
+            "14": {
+              "name": "R up",
+              "neutral_tick": 3260,
+              "end_tick": 3923,
+              "range_ticks": 663,
+              "end_ma": 95,
+              "end_by": "pull limit"
+            },
+            "9": {
+              "name": "L down",
+              "neutral_tick": 1743,
+              "end_tick": 2512,
+              "range_ticks": 769,
+              "end_ma": 114,
+              "end_by": "pull limit"
+            },
+            "16": {
+              "name": "L diag",
+              "neutral_tick": 415,
+              "end_tick": -243,
+              "range_ticks": 658,
+              "end_ma": -27,
+              "end_by": "pull limit"
+            },
+            "19": {
+              "name": "L up",
+              "neutral_tick": 2731,
+              "end_tick": 2055,
+              "range_ticks": 676,
+              "end_ma": -49,
+              "end_by": "pull limit"
+            }
+          }
+        },
+        {
+          "jaw_tick": 3883,
+          "jaw_ma_at_neutral": -264,
+          "lines": {
+            "8": {
+              "name": "R down",
+              "neutral_tick": 3650,
+              "end_tick": 4431,
+              "range_ticks": 781,
+              "end_ma": 20,
+              "end_by": "pull limit"
+            },
+            "11": {
+              "name": "R diag",
+              "neutral_tick": 2855,
+              "end_tick": 3506,
+              "range_ticks": 651,
+              "end_ma": 63,
+              "end_by": "pull limit"
+            },
+            "14": {
+              "name": "R up",
+              "neutral_tick": 3188,
+              "end_tick": 3851,
+              "range_ticks": 663,
+              "end_ma": 96,
+              "end_by": "pull limit"
+            },
+            "9": {
+              "name": "L down",
+              "neutral_tick": 1737,
+              "end_tick": 2504,
+              "range_ticks": 767,
+              "end_ma": 123,
+              "end_by": "pull limit"
+            },
+            "16": {
+              "name": "L diag",
+              "neutral_tick": 472,
+              "end_tick": -189,
+              "range_ticks": 661,
+              "end_ma": -46,
+              "end_by": "pull limit"
+            },
+            "19": {
+              "name": "L up",
+              "neutral_tick": 2742,
+              "end_tick": 2078,
+              "range_ticks": 664,
+              "end_ma": -79,
+              "end_by": "pull limit"
+            }
+          }
+        },
+        {
+          "jaw_tick": 3852,
+          "jaw_ma_at_neutral": -401,
+          "lines": {
+            "8": {
+              "name": "R down",
+              "neutral_tick": 4144,
+              "end_tick": 4928,
+              "range_ticks": 784,
+              "end_ma": 5,
+              "end_by": "pull limit"
+            },
+            "11": {
+              "name": "R diag",
+              "neutral_tick": 2820,
+              "end_tick": 3474,
+              "range_ticks": 654,
+              "end_ma": 83,
+              "end_by": "pull limit"
+            },
+            "14": {
+              "name": "R up",
+              "neutral_tick": 3139,
+              "end_tick": 3801,
+              "range_ticks": 662,
+              "end_ma": 89,
+              "end_by": "pull limit"
+            },
+            "9": {
+              "name": "L down",
+              "neutral_tick": 1734,
+              "end_tick": 2494,
+              "range_ticks": 760,
+              "end_ma": 150,
+              "end_by": "load"
+            },
+            "16": {
+              "name": "L diag",
+              "neutral_tick": 509,
+              "end_tick": -148,
+              "range_ticks": 657,
+              "end_ma": -52,
+              "end_by": "pull limit"
+            },
+            "19": {
+              "name": "L up",
+              "neutral_tick": 2763,
+              "end_tick": 2098,
+              "range_ticks": 665,
+              "end_ma": -109,
+              "end_by": "pull limit"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

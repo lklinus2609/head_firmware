@@ -1,0 +1,14 @@
+{
+  "format": "head-jaw-sweep-boxes-1",
+  "boxes": {
+    "jaw": "7",
+    "stages": "4",
+    "pull": "8- 11+ 14+ 9- 15- 19-",
+    "release": "8 9 11 14 15 19",
+    "preload_ma": "60",
+    "band_ma": "10",
+    "jaw_push_ma": "60",
+    "abort_ma": "280",
+    "max_travel_ticks": "600"
+  }
+}

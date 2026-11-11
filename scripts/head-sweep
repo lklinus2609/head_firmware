@@ -1,0 +1,31 @@
+#!/bin/sh
+# Location-independent launcher for the command-line jaw sweep runner
+# (sweep_runner.py). It needs pyserial; --camera realsense also needs
+# pyrealsense2, numpy and Pillow. bench/.venv carries all of them
+# (bench/requirements.txt), so it is tried first.
+set -eu
+
+script_path=$0
+# Follow symlinks so this can be linked into ~/.local/bin.
+while [ -L "$script_path" ]; do
+  link=$(readlink "$script_path")
+  case $link in
+    /*) script_path=$link ;;
+     *) script_path=$(dirname "$script_path")/$link ;;
+  esac
+done
+scripts_dir=$(CDPATH= cd -- "$(dirname -- "$script_path")" && pwd)
+firmware_dir=$(dirname -- "$scripts_dir")
+project_dir=$(dirname -- "$firmware_dir")
+
+runner_py=$firmware_dir/host_ros/src/head_ros/head_ros/sweep_runner.py
+[ -f "$runner_py" ] || { echo "head-sweep: cannot find $runner_py" >&2; exit 1; }
+
+for candidate in "$project_dir/bench/.venv/bin/python3" "$firmware_dir/.venv/bin/python3"; do
+  if [ -x "$candidate" ] && "$candidate" -c "import serial" 2>/dev/null; then
+    exec "$candidate" "$runner_py" "$@"
+  fi
+done
+echo "head-sweep: no Python with pyserial found." >&2
+echo "Install bench/requirements.txt into bench/.venv (see bench/README.md)." >&2
+exit 1

@@ -1,0 +1,128 @@
+{
+  "format": "head-tuning-record-1",
+  "started_utc": "2026-10-12T20:14:29.421604+00:00",
+  "current_limit_ma": 200,
+  "servos": {
+    "0": {
+      "branch": 0,
+      "neutral_tick": 3783,
+      "peak_current_ma": 15,
+      "marks": {}
+    },
+    "1": {
+      "branch": 0,
+      "neutral_tick": 992,
+      "peak_current_ma": 7,
+      "marks": {}
+    },
+    "2": {
+      "branch": 0,
+      "neutral_tick": 2607,
+      "peak_current_ma": 0,
+      "marks": {}
+    },
+    "3": {
+      "branch": 0,
+      "neutral_tick": 1035,
+      "peak_current_ma": 12,
+      "marks": {}
+    },
+    "4": {
+      "branch": 0,
+      "neutral_tick": 3762,
+      "peak_current_ma": 14,
+      "marks": {}
+    },
+    "5": {
+      "branch": 2,
+      "neutral_tick": 2920,
+      "peak_current_ma": 10,
+      "marks": {}
+    },
+    "6": {
+      "branch": 2,
+      "neutral_tick": 1284,
+      "peak_current_ma": 0,
+      "marks": {}
+    },
+    "7": {
+      "branch": 2,
+      "neutral_tick": 4053,
+      "peak_current_ma": 42,
+      "marks": {}
+    },
+    "8": {
+      "branch": 2,
+      "neutral_tick": 2535,
+      "peak_current_ma": 17,
+      "marks": {}
+    },
+    "9": {
+      "branch": 2,
+      "neutral_tick": 39,
+      "peak_current_ma": 7,
+      "marks": {}
+    },
+    "10": {
+      "branch": 1,
+      "neutral_tick": 1334,
+      "peak_current_ma": 15,
+      "marks": {}
+    },
+    "11": {
+      "branch": 1,
+      "neutral_tick": 2360,
+      "peak_current_ma": 6,
+      "marks": {}
+    },
+    "12": {
+      "branch": 1,
+      "neutral_tick": 1906,
+      "peak_current_ma": 0,
+      "marks": {}
+    },
+    "13": {
+      "branch": 1,
+      "neutral_tick": 510,
+      "peak_current_ma": 0,
+      "marks": {}
+    },
+    "14": {
+      "branch": 1,
+      "neutral_tick": 2858,
+      "peak_current_ma": 18,
+      "marks": {}
+    },
+    "15": {
+      "branch": 3,
+      "neutral_tick": 3103,
+      "peak_current_ma": 16,
+      "marks": {}
+    },
+    "16": {
+      "branch": 3,
+      "neutral_tick": 806,
+      "peak_current_ma": 6,
+      "marks": {}
+    },
+    "17": {
+      "branch": 3,
+      "neutral_tick": 2894,
+      "peak_current_ma": 10,
+      "marks": {}
+    },
+    "18": {
+      "branch": 3,
+      "neutral_tick": 3598,
+      "peak_current_ma": 6,
+      "marks": {}
+    },
+    "19": {
+      "branch": 3,
+      "neutral_tick": 3750,
+      "peak_current_ma": 16,
+      "marks": {}
+    }
+  },
+  "steps": []
+}

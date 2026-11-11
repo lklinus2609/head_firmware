@@ -15,3 +15,14 @@
 
 __pycache__/
 *.pyc
+
+# Tuning panel --preview records (simulated board, not real data)
+/tuning_runs/preview/
+
+# run data and videos
+tuning_runs/runs/
+tuning_runs/preview/
+*.webm
+*.mp4
+demo/*.webm
+tuning_runs/panel/*.telemetry.csv

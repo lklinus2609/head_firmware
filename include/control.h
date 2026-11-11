@@ -6,6 +6,21 @@
 bool head_control_reference_valid(const struct head_runtime *runtime,
                                   const struct head_calibration *calibration,
                                   uint8_t servo_index);
+/* The ticks that q = 0 and q = 1 map to: the homing reference when this servo
+ * has one, otherwise the profile's raw min_tick..max_tick. False when that
+ * range is empty or outside the Dynamixel position range. Either output
+ * pointer may be NULL. */
+bool head_control_position_range(const struct head_runtime *runtime,
+                                 const struct head_calibration *calibration,
+                                 uint8_t servo_index, int32_t *minimum_tick,
+                                 int32_t *maximum_tick);
+/* Call whenever a position range may have changed. */
+void head_control_note_position_range_changed(struct head_runtime *runtime);
+/* Set every active servo's requested q to its present goal tick. False, with
+ * nothing guaranteed about the requested values, when any active goal lies
+ * outside its position range. */
+bool head_control_seed_requested_positions(struct head_runtime *runtime,
+                                           const struct head_calibration *calibration);
 void head_control_init(struct head_runtime *runtime,
                        const struct head_calibration *calibration);
 bool head_control_accept_command(struct head_runtime *runtime,

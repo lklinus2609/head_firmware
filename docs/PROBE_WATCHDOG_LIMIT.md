@@ -58,11 +58,15 @@ Use `ping-debug`, which targets one ID instead of sweeping all 254. It is
 bounded by a single request/response and is safe at any supported baud:
 
 ```sh
-headctl --port /dev/ttyACM1 ping-debug --branch 3 --id 15 --baud 57600
+headctl ping-debug --branch 3 --id 15 --baud 57600
 ```
 
 To check whether a branch of servos is sitting at the factory baud, ping the
 specific IDs you expect rather than sweeping.
+
+Since 2026-10-05 `headctl` defaults `--baud` to 1,000,000, so a plain
+`headctl probe` uses the safe rate. An explicit `probe --baud 57600` still
+resets the board until the fix below lands.
 
 ## Fix
 

@@ -34,17 +34,41 @@
  * healthy bus. Same budget as the homing window, for the same reason. */
 #define HEAD_TELEMETRY_STALE_FAULT_MS 60u
 #define HEAD_PROPRIOCEPTION_SETTLE_MS 2000u
-/* Each physical servo branch is protected by a 3 A fuse. Keep the configured
- * and telemetry-derived servo-current sum below that hardware limit. */
+/* Each physical servo branch is protected by a 3 A fuse. The measured
+ * servo-current sum of a branch above this faults the head. Configured totals
+ * are not limited (decided 2026-10-06). */
 #define HEAD_BRANCH_CURRENT_BUDGET_MA 2500u
 #define HEAD_ROUTING_BASE_TICK 0
 /* One revolution of the servo's absolute encoder. Multi-turn Present Position
  * is this many ticks per turn, so the encoder zeros are its multiples. */
 #define HEAD_ENCODER_TICKS_PER_REVOLUTION 4096
+/* Largest single tuning step. A step away from neutral is refused while the
+ * servo still trails its goal, so steps cannot pile up into a larger jump. */
+#define HEAD_TUNING_MAX_STEP_TICKS 50
+/* A tendon's full travel never exceeds one turn in intended use, so tuning
+ * refuses any goal farther than one revolution from the pose it started at. */
+#define HEAD_TUNING_MAX_TRAVEL_TICKS HEAD_ENCODER_TICKS_PER_REVOLUTION
+/* A step away from neutral is refused once the servo trails its goal by
+ * the tuning current limit divided by HEAD_TUNING_LAG_CURRENT_MA_PER_TICK,
+ * and never less than HEAD_TUNING_MIN_LAG_TICKS. With Position I = 0 (set at
+ * discovery) the servo's current is proportional to that lag, so this is the
+ * lag at which it is already pulling with the limit the operator typed: the
+ * limit, not a fixed window, decides where a step stops. It also bounds how
+ * far a blocked servo's goal can lead, and so how far it can jump if the
+ * mechanism gives way. The ratio was 3.08 to 3.76 mA per tick over 68
+ * refused steps on servos 1, 7, 9, 17 and 18 (tuning record of 2026-10-06,
+ * Position P 900); 3 is below all of them, so the lag limit is reached no
+ * earlier than the current limit. */
+#define HEAD_TUNING_LAG_CURRENT_MA_PER_TICK 3u
+/* Floor for low limits: holding noise and gearbox lash alone need this much.
+ * Same window zero homing uses to declare arrival. */
+#define HEAD_TUNING_MIN_LAG_TICKS HEAD_ZERO_HOME_SETTLE_TICKS
 #define HEAD_DXL_POSITION_MIN_TICK (-1048575)
 #define HEAD_DXL_POSITION_MAX_TICK 1048575
-#define HEAD_COACTUATED_GROUP_A_MASK ((1u << 9u) | (1u << 12u) | (1u << 14u))
-#define HEAD_COACTUATED_GROUP_B_MASK ((1u << 8u) | (1u << 17u) | (1u << 19u))
+/* Co-actuated modiolus groups (tuning_runs/servo_notes.json; new head
+ * 2026-11-09): right 8 down / 11 diag / 14 up, left 9 down / 15 diag / 19 up. */
+#define HEAD_COACTUATED_GROUP_A_MASK ((1u << 8u) | (1u << 11u) | (1u << 14u))
+#define HEAD_COACTUATED_GROUP_B_MASK ((1u << 9u) | (1u << 15u) | (1u << 19u))
 
 enum head_command_mode {
   HEAD_COMMAND_POSITION = 0,
@@ -65,6 +89,9 @@ enum head_state {
   HEAD_PROPRIOCEPTION_HOLD,
   /* Fixture-wiring hold at the Dynamixel 0-degree encoder position. */
   HEAD_ROUTING,
+  /* Commissioning: every active servo holds where it was at torque-on, and
+   * the operator jogs one servo at a time in single-tick steps. */
+  HEAD_TUNING,
 };
 
 enum head_fault {
@@ -143,6 +170,8 @@ struct head_servo_state {
   /* Signed Dynamixel Present Velocity register value (unit: 0.229 rpm). */
   int32_t present_velocity_raw;
   int16_t present_current_ma;
+  /* Signed Present PWM(124) register value (unit: 0.113 %). */
+  int16_t present_pwm_raw;
   uint16_t present_voltage_mv;
   uint8_t temperature_c;
   uint8_t moving_status;
@@ -232,6 +261,14 @@ struct head_runtime {
   uint32_t homing_motion_remainder_ticks_per_second[HEAD_SERVO_COUNT];
   bool homing_reference_valid[HEAD_SERVO_COUNT];
   float requested_position_normalized[HEAD_SERVO_COUNT];
+  /* Goal Current(102) for every active servo during tuning, and each servo's
+   * goal when tuning began; travel is bounded relative to that neutral pose. */
+  uint16_t tuning_current_limit_ma;
+  int32_t tuning_neutral_tick[HEAD_SERVO_COUNT];
+  /* Changes whenever the tick that q = 0 or q = 1 maps to may have changed
+   * (profile applied, homing reference set or cleared). STATE carries it so a
+   * host can tell that its copy of POSITION_RANGE is out of date. */
+  uint8_t position_range_generation;
   struct head_servo_state servos[HEAD_SERVO_COUNT];
   struct head_branch_health branches[HEAD_BRANCH_COUNT];
 };

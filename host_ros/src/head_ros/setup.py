@@ -21,5 +21,6 @@ setup(
         "headctl = head_ros.headctl:main",
         "head_proprioception_collector = head_ros.collector:main",
         "head_proprioception_gui = head_ros.collector_gui:main",
+        "head_jog_gui = head_ros.jog_gui:main",
     ]},
 )

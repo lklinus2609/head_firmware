@@ -13,7 +13,10 @@
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>python3-serial</exec_depend>
-  <exec_depend>python3-qt-binding</exec_depend>
+  <exec_depend>python_qt_binding</exec_depend>
   <exec_depend>rosbag2</exec_depend>
-  <exec_depend>rosbag2-storage-mcap</exec_depend>
+  <exec_depend>rosbag2_storage_mcap</exec_depend>
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
 </package>

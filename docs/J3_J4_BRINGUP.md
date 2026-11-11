@@ -17,9 +17,9 @@ faults, until the branch idle level has been measured.
 | 2 | J3 | 10–14 | 10, 11, 12, 13, 14 | 2000 mA of 2500 mA |
 | 3 | J4 | 15–19 | 15, 16, 17, 18, 19 | 2000 mA of 2500 mA |
 
-Firmware requires `servo_id == servo_index` and
-`branch_index == servo_index / 5` (`head_config_validate()` in
-`../src/config.c`). These IDs are not free choices.
+Firmware requires `servo_id == servo_index` (`head_config_validate()` in
+`../src/config.c`). The branch is the profile slot's `branch` field, at most
+five active servos per branch; it no longer has to equal `servo_index / 5`.
 
 Profile: `../profiles/j3_j4_ten_servo.json` — mask `0xFFC00`, 10 active servos,
 `allow_partial_inventory = 1`, `expected_servo_count = 10`. Regenerate or
@@ -46,8 +46,10 @@ as soon as you are not standing in the repository root.
 
 ## Step 0 — preconditions
 
-- Production image flashed. `/dev/ttyACM0` is the Zephyr console,
-  `/dev/ttyACM1` is the head protocol port (the `--port` default).
+- Production image flashed. CDC0 is the Zephyr console and CDC1 is the head
+  protocol port. `headctl` finds CDC1 itself (`--port auto`, the default)
+  through `/dev/serial/by-id/usb-ZEPHYR_Head*-if02`, so its `ttyACM` number
+  does not matter.
 - **Teensy USB connected.** Per HW-2 the logic rail is USB-powered; 12 V alone
   leaves the bus undefined.
 - 12 V supply on, current limit set, servos connected to J3 and J4.
@@ -61,8 +63,8 @@ as soon as you are not standing in the repository root.
 is actually on the wire rather than what is expected.
 
 ```sh
-firmware/scripts/headctl --port /dev/ttyACM1 probe --branch 2 --baud 1000000
-firmware/scripts/headctl --port /dev/ttyACM1 probe --branch 3 --baud 1000000
+firmware/scripts/headctl probe --branch 2 --baud 1000000
+firmware/scripts/headctl probe --branch 3 --baud 1000000
 ```
 
 Expected:
@@ -88,7 +90,7 @@ hardware watchdog at that baud and resets the MCU — see
 safe at any baud:
 
 ```sh
-firmware/scripts/headctl --port /dev/ttyACM1 ping-debug --branch 3 --id 15 --baud 57600
+firmware/scripts/headctl ping-debug --branch 3 --id 15 --baud 57600
 ```
 
 If the servos appear at 57,600, their Baud Rate register is still at the
@@ -115,8 +117,8 @@ branch. Unplug and isolate; do not proceed.
 Confirm the read path is healthy on each branch, torque-off, with one servo:
 
 ```sh
-firmware/scripts/headctl --port /dev/ttyACM1 read-register --branch 2 --id 10 --address 64 --length 1   # Torque Enable, expect 0
-firmware/scripts/headctl --port /dev/ttyACM1 read-register --branch 3 --id 15 --address 64 --length 1
+firmware/scripts/headctl read-register --branch 2 --id 10 --address 64 --length 1   # Torque Enable, expect 0
+firmware/scripts/headctl read-register --branch 3 --id 15 --address 64 --length 1
 ```
 
 ## Step 3 — upload the profile
@@ -126,7 +128,7 @@ slot, commits, waits for persistence, and re-reads to confirm the stored
 profile matches.
 
 ```sh
-firmware/scripts/headctl --port /dev/ttyACM1 upload-profile --file firmware/profiles/j3_j4_ten_servo.json
+firmware/scripts/headctl upload-profile --file firmware/profiles/j3_j4_ten_servo.json
 ```
 
 Success prints `profile accepted and queued for persistence` then
@@ -137,9 +139,9 @@ was stored — fix the cause and repeat rather than retrying blind.
 ## Step 4 — verify
 
 ```sh
-firmware/scripts/headctl --port /dev/ttyACM1 export-profile --file /tmp/readback.json
+firmware/scripts/headctl export-profile --file /tmp/readback.json
 python3 firmware/scripts/generate_profile.py --check /tmp/readback.json
-firmware/scripts/headctl --port /dev/ttyACM1 diagnostics
+firmware/scripts/headctl diagnostics
 ```
 
 `--check` should report `10 active servos, mask 0xFFC00` with 2000 mA on

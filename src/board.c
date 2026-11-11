@@ -13,6 +13,8 @@
 
 #include "board.h"
 
+__dtcm_noinit_section struct head_board_trace head_board_trace;
+
 #if defined(HEAD_BENCH_NO_12V)
 
 int head_board_init(void) { return -ENOTSUP; }
@@ -57,6 +59,17 @@ void head_board_branch_rx_stats(uint8_t branch_index, uint16_t *disabled,
   if (restart_failures != NULL) *restart_failures = 0u;
   if (overflows != NULL) *overflows = 0u;
 }
+void head_board_branch_error_counts(uint8_t branch_index,
+                                    struct head_board_error_counts *counts)
+{
+  ARG_UNUSED(branch_index);
+  if (counts != NULL) memset(counts, 0, sizeof(*counts));
+}
+void head_board_dma_error_registers(uint32_t *error_status, uint32_t *error_channels,
+                                    uint32_t *interrupt_channels)
+{ *error_status = 0u; *error_channels = 0u; *interrupt_channels = 0u; }
+uint32_t head_board_branch_uart_status(uint8_t branch_index)
+{ ARG_UNUSED(branch_index); return 0u; }
 int head_board_fan_set_percent(uint8_t percent)
 { ARG_UNUSED(percent); return -ENOTSUP; }
 uint16_t head_board_fan_rpm(void) { return 0u; }
@@ -118,7 +131,9 @@ static void fan_tach_edge(const struct device *device, struct gpio_callback *cal
 
 BUILD_ASSERT(IS_ENABLED(CONFIG_NOCACHE_MEMORY), "UART DMA requires MPU noncacheable RAM");
 #define HEAD_BRANCH_TX_CAPACITY 96u
-#define HEAD_BRANCH_RX_DMA_CAPACITY 512u
+/* Larger than any reply train (five stuffed replies, about 570 bytes), so the
+ * fresh buffer started before each Sync Read never fills during it. */
+#define HEAD_BRANCH_RX_DMA_CAPACITY 1024u
 #define HEAD_BRANCH_RX_RING_CAPACITY 1024u
 struct branch_tx_state {
   struct k_sem done;
@@ -141,11 +156,36 @@ struct branch_tx_state {
   atomic_t rx_starvation_count;
   atomic_t rx_restart_failures;
   atomic_t rx_overflow_count;
+  atomic_t overrun_count;
+  atomic_t framing_error_count;
+  atomic_t noise_error_count;
+  /* Continuity of UART_RX_RDY ranges, guarded by rx_lock. */
+  const uint8_t *rx_expected_buffer;
+  size_t rx_expected_offset;
+  atomic_t rx_gap_count;
+  atomic_t rx_overlap_count;
+  atomic_t dma_halt_sample_count;
 };
 /* DMA payloads alone live in the MPU noncacheable region. Kernel objects and
  * CPU-owned rings remain in ordinary RAM. Each row starts on a cache line. */
 static uint8_t branch_tx_payload[4][HEAD_BRANCH_TX_CAPACITY] __nocache __aligned(32);
 static uint8_t branch_rx_payload[4][2][HEAD_BRANCH_RX_DMA_CAPACITY] __nocache __aligned(32);
+/* Each branch's eDMA channels, from the LPUART dmas properties, and the
+ * per-channel error counts kept by the patched dma_mcux_edma.c. */
+extern uint32_t dma_mcux_edma_channel_error_count[32];
+extern uint32_t dma_mcux_edma_channel_last_error_status[32];
+static const uint8_t rx_dma_channels[4] = {
+  DT_DMAS_CELL_BY_NAME(DT_NODELABEL(lpuart6), rx, mux),
+  DT_DMAS_CELL_BY_NAME(DT_NODELABEL(lpuart1), rx, mux),
+  DT_DMAS_CELL_BY_NAME(DT_NODELABEL(lpuart3), rx, mux),
+  DT_DMAS_CELL_BY_NAME(DT_NODELABEL(lpuart5), rx, mux),
+};
+static const uint8_t tx_dma_channels[4] = {
+  DT_DMAS_CELL_BY_NAME(DT_NODELABEL(lpuart6), tx, mux),
+  DT_DMAS_CELL_BY_NAME(DT_NODELABEL(lpuart1), tx, mux),
+  DT_DMAS_CELL_BY_NAME(DT_NODELABEL(lpuart3), tx, mux),
+  DT_DMAS_CELL_BY_NAME(DT_NODELABEL(lpuart5), tx, mux),
+};
 static struct branch_tx_state branch_tx[4];
 
 static int branch_wait_transmission_complete(uint8_t branch_index)
@@ -183,6 +223,10 @@ static void branch_uart_callback(const struct device *device,
                                  struct uart_event *event, void *user_data)
 {
   struct branch_tx_state *tx = user_data;
+  if ((uint32_t)event->type < HEAD_BOARD_UART_EVENT_TYPE_COUNT) {
+    ++head_board_trace.uart_event_count[tx->branch_index][event->type];
+    head_board_trace.uart_last_event_ms[tx->branch_index] = k_uptime_get_32();
+  }
   switch (event->type) {
   case UART_TX_DONE:
     /* DMA completion is not necessarily shift-register completion, so the
@@ -209,6 +253,15 @@ static void branch_uart_callback(const struct device *device,
     break;
   case UART_RX_RDY: {
     const k_spinlock_key_t key = k_spin_lock(&tx->rx_lock);
+    /* The driver reports each DMA buffer as consecutive ranges from offset
+     * 0. A range that starts elsewhere means bytes were skipped or repeated
+     * between the DMA engine and this callback. */
+    const size_t expected_offset = event->data.rx.buf == tx->rx_expected_buffer ?
+                                   tx->rx_expected_offset : 0u;
+    if (event->data.rx.offset > expected_offset) atomic_inc(&tx->rx_gap_count);
+    if (event->data.rx.offset < expected_offset) atomic_inc(&tx->rx_overlap_count);
+    tx->rx_expected_buffer = event->data.rx.buf;
+    tx->rx_expected_offset = event->data.rx.offset + event->data.rx.len;
     const uint32_t stored = ring_buf_put(&tx->rx_ring,
         &event->data.rx.buf[event->data.rx.offset], event->data.rx.len);
     if (stored != event->data.rx.len) {
@@ -254,6 +307,9 @@ static void branch_uart_callback(const struct device *device,
     }
     break;
   case UART_RX_STOPPED:
+    /* The patched driver reports an overrun here after clearing it at once,
+     * with RX still enabled (firmware/patches/). */
+    if ((event->data.rx_stop.reason & UART_ERROR_OVERRUN) != 0) atomic_inc(&tx->overrun_count);
     atomic_or(&tx->rx_error_flags, (atomic_val_t)event->data.rx_stop.reason);
     break;
   case UART_RX_DISABLED:
@@ -269,6 +325,10 @@ static void branch_uart_callback(const struct device *device,
 static int branch_rx_start(uint8_t branch_index)
 {
   struct branch_tx_state *tx = &branch_tx[branch_index];
+  const k_spinlock_key_t key = k_spin_lock(&tx->rx_lock);
+  tx->rx_expected_buffer = NULL;
+  tx->rx_expected_offset = 0u;
+  k_spin_unlock(&tx->rx_lock, key);
   atomic_clear(&tx->rx_buffers_used);
   atomic_set_bit(&tx->rx_buffers_used, 0u);
   const int result = uart_rx_enable(branch_uart[branch_index], branch_rx_payload[tx->branch_index][0],
@@ -397,8 +457,35 @@ int head_board_release_all(void)
 uint32_t head_board_branch_error_flags(uint8_t branch_index)
 {
   if (branch_index >= 4u || branch_uart[branch_index] == NULL) return 0u;
-  return (uint32_t)atomic_set(&branch_tx[branch_index].rx_error_flags, 0) |
-         (uint32_t)uart_err_check(branch_uart[branch_index]);
+  struct branch_tx_state *tx = &branch_tx[branch_index];
+  /* mcux_lpuart_err_check() reads and clears OR/PF/FE/NF and reports the
+   * noise flag as UART_ERROR_PARITY; parity is off, so that bit is noise. */
+  const int uart_errors = uart_err_check(branch_uart[branch_index]);
+  const uint32_t uart_flags = uart_errors > 0 ? (uint32_t)uart_errors : 0u;
+  if ((uart_flags & UART_ERROR_OVERRUN) != 0u) atomic_inc(&tx->overrun_count);
+  if ((uart_flags & UART_ERROR_FRAMING) != 0u) atomic_inc(&tx->framing_error_count);
+  if ((uart_flags & UART_ERROR_PARITY) != 0u) atomic_inc(&tx->noise_error_count);
+  if ((DMA0->CR & DMA_CR_HALT_MASK) != 0u) atomic_inc(&tx->dma_halt_sample_count);
+  return (uint32_t)atomic_set(&tx->rx_error_flags, 0) | uart_flags;
+}
+
+void head_board_branch_error_counts(uint8_t branch_index,
+                                    struct head_board_error_counts *counts)
+{
+  if (branch_index >= 4u || counts == NULL) return;
+  const struct branch_tx_state *tx = &branch_tx[branch_index];
+  counts->overrun_count = (uint32_t)atomic_get(&tx->overrun_count);
+  counts->framing_error_count = (uint32_t)atomic_get(&tx->framing_error_count);
+  counts->noise_error_count = (uint32_t)atomic_get(&tx->noise_error_count);
+  counts->ring_overflow_count = (uint32_t)atomic_get(&tx->rx_overflow_count);
+  counts->dma_starvation_count = (uint32_t)atomic_get(&tx->rx_starvation_count);
+  counts->rx_gap_count = (uint32_t)atomic_get(&tx->rx_gap_count);
+  counts->rx_overlap_count = (uint32_t)atomic_get(&tx->rx_overlap_count);
+  counts->dma_rx_error_count = dma_mcux_edma_channel_error_count[rx_dma_channels[branch_index]];
+  counts->dma_tx_error_count = dma_mcux_edma_channel_error_count[tx_dma_channels[branch_index]];
+  counts->dma_halt_sample_count = (uint32_t)atomic_get(&tx->dma_halt_sample_count);
+  counts->dma_rx_last_error_status =
+      dma_mcux_edma_channel_last_error_status[rx_dma_channels[branch_index]];
 }
 
 int head_board_branch_uart_tx_meter_test(uint8_t branch_index, uint32_t duration_ms)
@@ -533,6 +620,19 @@ size_t head_board_branch_read_available(uint8_t branch_index, uint8_t *data,
   used = ring_buf_get(&branch_tx[branch_index].rx_ring, data, capacity);
   k_spin_unlock(&branch_tx[branch_index].rx_lock, key);
   return (size_t)used;
+}
+
+void head_board_dma_error_registers(uint32_t *error_status, uint32_t *error_channels,
+                                    uint32_t *interrupt_channels)
+{
+  *error_status = DMA0->ES;
+  *error_channels = DMA0->ERR;
+  *interrupt_channels = DMA0->INT;
+}
+
+uint32_t head_board_branch_uart_status(uint8_t branch_index)
+{
+  return branch_index < 4u ? uart_bases[branch_index]->STAT : 0u;
 }
 
 void head_board_branch_rx_stats(uint8_t branch_index, uint16_t *disabled,

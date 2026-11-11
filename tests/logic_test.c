@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <assert.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -75,13 +76,13 @@ static void test_branch_current_budget(void)
   calibration.joints[2].servo_id = 2u;
   calibration.joints[2].operating_current_ma = 834;
   head_config_finalize(&calibration);
-  assert(head_config_operating_current_branch_ma(&calibration, 0u) == 2500u);
   assert(head_config_validate(&calibration));
 
+  /* Configured branch totals are not limited (decided 2026-10-06); the
+   * measured branch current is supervised live instead. */
   calibration.joints[2].operating_current_ma = 835;
   head_config_finalize(&calibration);
-  assert(head_config_operating_current_branch_ma(&calibration, 0u) == 2501u);
-  assert(!head_config_validate(&calibration));
+  assert(head_config_validate(&calibration));
 
   runtime.servos[0].present_current_ma = -900;
   runtime.servos[1].present_current_ma = 901;
@@ -100,9 +101,78 @@ static void test_branch_current_budget(void)
   calibration.joints[5].operating_current_ma = 900;
   calibration.joints[10].operating_current_ma = 900;
   head_config_finalize(&calibration);
-  assert(head_config_operating_current_branch_ma(&calibration, 0u) == 900u);
-  assert(head_config_operating_current_branch_ma(&calibration, 1u) == 900u);
-  assert(head_config_operating_current_branch_ma(&calibration, 2u) == 900u);
+  assert(head_config_validate(&calibration));
+}
+
+static void test_profile_declares_branch(void)
+{
+  struct head_calibration calibration;
+  struct head_runtime runtime;
+  uint8_t servo_indexes[HEAD_SERVOS_PER_BRANCH];
+
+  /* IDs 15-19 on J2 and 5-9 on J4, the cabling found on 2026-09-28. */
+  make_valid_calibration(&calibration);
+  calibration.expected_servo_count = 10u;
+  calibration.active_servo_mask = 0u;
+  for (uint8_t index = 5u; index < 10u; ++index) {
+    calibration.joints[index] = calibration.joints[0];
+    calibration.joints[index].servo_id = index;
+    calibration.joints[index].branch_index = 3u;
+    calibration.joints[index + 10u] = calibration.joints[0];
+    calibration.joints[index + 10u].servo_id = (uint8_t)(index + 10u);
+    calibration.joints[index + 10u].branch_index = 1u;
+    calibration.active_servo_mask |= (1u << index) | (1u << (index + 10u));
+  }
+  calibration.joints[7].operating_current_ma = 300;
+  calibration.joints[17].operating_current_ma = 200;
+  head_config_finalize(&calibration);
+  assert(head_config_validate(&calibration));
+  assert(head_config_branch_servo_indexes(&calibration, 1u, servo_indexes) == 5u);
+  assert(servo_indexes[0] == 15u && servo_indexes[4] == 19u);
+  assert(head_config_branch_servo_indexes(&calibration, 3u, servo_indexes) == 5u);
+  assert(servo_indexes[0] == 5u && servo_indexes[4] == 9u);
+  assert(head_config_branch_servo_indexes(&calibration, 0u, servo_indexes) == 0u);
+  assert(head_config_branch_servo_indexes(&calibration, 2u, servo_indexes) == 0u);
+
+  memset(&runtime, 0, sizeof(runtime));
+  runtime.servos[7].present_current_ma = 1000;
+  runtime.servos[17].present_current_ma = -400;
+  assert(head_control_present_current_branch_ma(&runtime, &calibration, 3u) == 1000u);
+  assert(head_control_present_current_branch_ma(&runtime, &calibration, 1u) == 400u);
+
+  /* Five servos at 600 mA on one branch (3,000 mA configured) are accepted. */
+  for (uint8_t index = 5u; index < 10u; ++index) {
+    calibration.joints[index].operating_current_ma = 600;
+  }
+  head_config_finalize(&calibration);
+  assert(head_config_validate(&calibration));
+
+  /* A sixth active servo on one branch exceeds the Sync Read window. */
+  make_valid_calibration(&calibration);
+  calibration.expected_servo_count = 6u;
+  calibration.active_servo_mask = 0u;
+  for (uint8_t index = 0u; index < 6u; ++index) {
+    calibration.joints[index * 3u] = calibration.joints[0];
+    calibration.joints[index * 3u].servo_id = (uint8_t)(index * 3u);
+    calibration.joints[index * 3u].branch_index = 2u;
+    calibration.active_servo_mask |= 1u << (index * 3u);
+  }
+  head_config_finalize(&calibration);
+  assert(!head_config_validate(&calibration));
+  assert(head_config_branch_servo_indexes(&calibration, 2u, servo_indexes) ==
+         HEAD_SERVOS_PER_BRANCH);
+  calibration.joints[15].branch_index = 0u;
+  head_config_finalize(&calibration);
+  assert(head_config_validate(&calibration));
+
+  /* An active servo must name a real branch; an inactive one is ignored. */
+  make_valid_calibration(&calibration);
+  calibration.joints[0].branch_index = HEAD_BRANCH_COUNT;
+  head_config_finalize(&calibration);
+  assert(!head_config_validate(&calibration));
+  make_valid_calibration(&calibration);
+  calibration.joints[4].branch_index = 200u;
+  head_config_finalize(&calibration);
   assert(head_config_validate(&calibration));
 }
 
@@ -656,10 +726,307 @@ static void test_shifted_homing_reference_position_boundaries(void)
   assert(!head_control_reference_valid(&runtime, &calibration, 0u));
 }
 
+/* 2026-10-20: one joint (the jaw) may be allowed more than the others. Each
+ * servo's tuning cap is the requested limit or its own operating_current_ma,
+ * whichever is lower, for the Goal Current and for refusing steps. */
+static void test_tuning_per_servo_limit(void)
+{
+  struct head_calibration calibration;
+  struct head_runtime runtime = {0};
+  make_valid_calibration(&calibration);  /* servo 0 active, 100 mA operating */
+  /* Servo 1 set up like servo 0 (its default branch and ID), but 650 mA. */
+  calibration.expected_servo_count = 2u;
+  calibration.active_servo_mask = 0x3u;
+  calibration.joints[1].homing_direction = 1.0f;
+  calibration.joints[1].homing_max_travel_ticks = 100;
+  calibration.joints[1].homing_timeout_ms = 1000u;
+  calibration.joints[1].operating_current_ma = 650;
+  calibration.joints[1].homing_current_ma = 50;
+  calibration.joints[1].homing_following_error_ticks = 0;
+  calibration.joints[1].homing_persistence_ms = 10u;
+  calibration.joints[1].homing_current_limit_ma = 75;
+  calibration.joints[1].homing_speed_ticks_per_second = 500u;
+  calibration.joints[1].homing_backoff_ticks = 5;
+  head_config_finalize(&calibration);
+  assert(head_config_validate(&calibration));
+  head_state_init(&runtime);
+  runtime.state = HEAD_HOMING_REQUIRED;
+  runtime.torque_state = HEAD_TORQUE_OFF_VERIFIED;
+  runtime.discovery_verified = true;
+
+  /* Above the highest operating current caps nothing: refused. */
+  assert(!head_state_request_tuning(&runtime, &calibration, 651u));
+  assert(head_state_request_tuning(&runtime, &calibration, 650u));
+  assert(head_state_tuning_limit_ma(&runtime, &calibration, 0u) == 100u);
+  assert(head_state_tuning_limit_ma(&runtime, &calibration, 1u) == 650u);
+  runtime.tuning_current_limit_ma = 300u;
+  assert(head_state_tuning_limit_ma(&runtime, &calibration, 0u) == 100u);
+  assert(head_state_tuning_limit_ma(&runtime, &calibration, 1u) == 300u);
+  runtime.tuning_current_limit_ma = 650u;
+
+  /* Both servos read 120 mA: servo 0 is past its own 100 mA cap, servo 1 is
+   * well inside its 650 mA one. */
+  runtime.state = HEAD_TUNING;
+  runtime.torque_state = HEAD_TORQUE_ON_VERIFIED;
+  for (uint8_t index = 0u; index < 2u; ++index) {
+    runtime.servos[index].goal_tick = 1000;
+    runtime.servos[index].present_tick = 1000;
+    runtime.tuning_neutral_tick[index] = 1000;
+    runtime.servos[index].last_current_feedback_ms = 500u;
+    runtime.servos[index].present_current_ma = 120;
+  }
+  assert(head_state_tuning_step(&runtime, &calibration, 0u, 1, 510u) == -EBUSY);
+  assert(head_state_tuning_step(&runtime, &calibration, 1u, 1, 510u) == 0);
+  /* The lag limit follows each servo's own cap too: 100 / 3 = 33 ticks is
+   * past servo 0's limit but inside servo 1's 650 / 3 = 216. */
+  runtime.servos[0].present_current_ma = 0;
+  runtime.servos[1].present_current_ma = 0;
+  runtime.servos[0].goal_tick = 1040;
+  runtime.servos[1].goal_tick = 1040;
+  assert(head_state_tuning_step(&runtime, &calibration, 0u, 1, 510u) == -EBUSY);
+  assert(head_state_tuning_step(&runtime, &calibration, 1u, 1, 510u) == 0);
+}
+
+static void test_tuning_request_and_steps(void)
+{
+  struct head_calibration calibration;
+  struct head_runtime runtime = {0};
+  make_valid_calibration(&calibration);  /* servo 0 active, 100 mA operating */
+  head_state_init(&runtime);
+  runtime.state = HEAD_HOMING_REQUIRED;
+  runtime.torque_state = HEAD_TORQUE_OFF_VERIFIED;
+  runtime.discovery_verified = true;
+
+  /* The limit must be set and may not exceed operating_current_ma. */
+  assert(!head_state_request_tuning(&runtime, &calibration, 0u));
+  assert(!head_state_request_tuning(&runtime, &calibration, 101u));
+  assert(head_state_request_tuning(&runtime, &calibration, 40u));
+  assert(runtime.tuning_current_limit_ma == 40u);
+  assert(runtime.state == HEAD_HOMING_REQUIRED);  /* preparation changes state */
+  runtime.state = HEAD_READY;
+  assert(!head_state_request_tuning(&runtime, &calibration, 40u));
+
+  /* Preparation finished into TUNING at a pose 1000 ticks from zero. */
+  runtime.state = HEAD_TUNING;
+  runtime.torque_state = HEAD_TORQUE_ON_VERIFIED;
+  runtime.servos[0].goal_tick = 1000;
+  runtime.servos[0].present_tick = 1000;
+  runtime.tuning_neutral_tick[0] = 1000;
+  runtime.servos[0].last_current_feedback_ms = 500u;
+  assert(head_state_tuning_step(&runtime, &calibration, 0u, 1, 510u) == 0);
+  assert(runtime.servos[0].goal_tick == 1001);
+  assert(head_state_tuning_step(&runtime, &calibration, 0u, -1, 510u) == 0);
+  assert(head_state_tuning_step(&runtime, &calibration, 0u, -1, 510u) == 0);
+  assert(runtime.servos[0].goal_tick == 999);
+
+  /* A large step moves the whole amount at once. */
+  assert(head_state_tuning_step(&runtime, &calibration, 0u, HEAD_TUNING_MAX_STEP_TICKS, 510u) == 0);
+  assert(runtime.servos[0].goal_tick == 999 + HEAD_TUNING_MAX_STEP_TICKS);
+  /* The servo has not caught up yet, so the next step away is refused... */
+  assert(head_state_tuning_step(&runtime, &calibration, 0u, 10, 510u) == -EBUSY);
+  /* ...but stepping back is allowed. */
+  assert(head_state_tuning_step(&runtime, &calibration, 0u, -HEAD_TUNING_MAX_STEP_TICKS, 510u) == 0);
+  assert(runtime.servos[0].goal_tick == 999);
+
+  /* Bad requests and stale feedback move nothing. */
+  assert(head_state_tuning_step(&runtime, &calibration, 1u, 1, 510u) == -EINVAL);
+  assert(head_state_tuning_step(&runtime, &calibration, 0u,
+                                (int8_t)(HEAD_TUNING_MAX_STEP_TICKS + 1), 510u) == -EINVAL);
+  assert(head_state_tuning_step(&runtime, &calibration, 0u,
+                                (int8_t)-(HEAD_TUNING_MAX_STEP_TICKS + 1), 510u) == -EINVAL);
+  assert(head_state_tuning_step(&runtime, &calibration, 0u, 0, 510u) == -EINVAL);
+  assert(head_state_tuning_step(&runtime, &calibration, 0u, 1,
+                                500u + HEAD_COMMAND_FEEDBACK_FRESH_MS + 1u) == -EAGAIN);
+  assert(runtime.servos[0].goal_tick == 999);
+
+  /* Saturated at the limit: away from neutral is refused, back is allowed. */
+  runtime.servos[0].present_current_ma = -40;
+  assert(head_state_tuning_step(&runtime, &calibration, 0u, -1, 510u) == -EBUSY);
+  assert(head_state_tuning_step(&runtime, &calibration, 0u, 1, 510u) == 0);
+  assert(runtime.servos[0].goal_tick == 1000);
+  runtime.servos[0].present_current_ma = 39;
+
+  /* Trailing the goal means the mechanism resists: same rule. */
+  runtime.servos[0].goal_tick = 1100;
+  runtime.servos[0].present_tick = 1100 - HEAD_TUNING_MIN_LAG_TICKS;
+  assert(head_state_tuning_step(&runtime, &calibration, 0u, 1, 510u) == -EBUSY);
+  assert(head_state_tuning_step(&runtime, &calibration, 0u, -1, 510u) == 0);
+  runtime.servos[0].present_tick = runtime.servos[0].goal_tick;
+
+  /* One turn from neutral is the end of travel, in both directions. */
+  runtime.servos[0].goal_tick = 1000 + HEAD_TUNING_MAX_TRAVEL_TICKS;
+  runtime.servos[0].present_tick = runtime.servos[0].goal_tick;
+  assert(head_state_tuning_step(&runtime, &calibration, 0u, 1, 510u) == -ERANGE);
+  assert(head_state_tuning_step(&runtime, &calibration, 0u, -1, 510u) == 0);
+  runtime.servos[0].goal_tick = 1000 - HEAD_TUNING_MAX_TRAVEL_TICKS;
+  runtime.servos[0].present_tick = runtime.servos[0].goal_tick;
+  assert(head_state_tuning_step(&runtime, &calibration, 0u, -1, 510u) == -ERANGE);
+
+  /* Outside TUNING, or after a fault, no step is accepted. */
+  head_state_fault(&runtime, HEAD_FAULT_BUS);
+  assert(head_state_tuning_step(&runtime, &calibration, 0u, 1, 510u) == -EPERM);
+  runtime = (struct head_runtime){0};
+  runtime.state = HEAD_ENABLED;
+  runtime.torque_state = HEAD_TORQUE_ON_VERIFIED;
+  runtime.servos[0].last_current_feedback_ms = 500u;
+  assert(head_state_tuning_step(&runtime, &calibration, 0u, 1, 510u) == -EPERM);
+}
+
+/* Seeding must reproduce the exact goal tick, or Enable moves the servo. */
+static void check_seed_round_trip(int32_t min_tick, int32_t max_tick, int32_t stride)
+{
+  struct head_calibration calibration;
+  struct head_runtime runtime = {0};
+  make_valid_calibration(&calibration);
+  calibration.joints[0].min_tick = min_tick;
+  calibration.joints[0].max_tick = max_tick;
+  calibration.joints[0].home_tick = min_tick + (max_tick - min_tick) / 2;
+  head_config_finalize(&calibration);
+  assert(head_config_validate(&calibration));
+  for (int64_t goal = min_tick; goal <= max_tick; goal += stride) {
+    runtime.servos[0].goal_tick = (int32_t)goal;
+    assert(head_control_seed_requested_positions(&runtime, &calibration));
+    assert(head_control_target_tick(&runtime, &calibration, 0u) == (int32_t)goal);
+  }
+  runtime.servos[0].goal_tick = max_tick;
+  assert(head_control_seed_requested_positions(&runtime, &calibration));
+  assert(head_control_target_tick(&runtime, &calibration, 0u) == max_tick);
+  runtime.servos[0].goal_tick = min_tick - 1;
+  assert(!head_control_seed_requested_positions(&runtime, &calibration));
+  runtime.servos[0].goal_tick = max_tick + 1;
+  assert(!head_control_seed_requested_positions(&runtime, &calibration));
+}
+
+static void test_enable_seeds_requested_positions_exactly(void)
+{
+  check_seed_round_trip(0, 4095, 1);
+  check_seed_round_trip(-5000, -1012, 1);
+  check_seed_round_trip(-4096, 4096, 1);
+  check_seed_round_trip(HEAD_DXL_POSITION_MIN_TICK, HEAD_DXL_POSITION_MAX_TICK, 7);
+}
+
+static void test_enable_at_present_pose_request(void)
+{
+  struct head_calibration calibration;
+  struct head_runtime runtime = {0};
+  int32_t minimum = 0;
+  int32_t maximum = 0;
+  make_valid_calibration(&calibration);
+  calibration.joints[0].min_tick = -1200;
+  calibration.joints[0].max_tick = 300;
+  calibration.joints[0].home_tick = -400;
+  head_config_finalize(&calibration);
+  assert(head_config_validate(&calibration));
+  head_state_init(&runtime);
+  runtime.state = HEAD_HOMING_REQUIRED;
+  runtime.torque_state = HEAD_TORQUE_OFF_VERIFIED;
+  runtime.discovery_verified = true;
+
+  /* A homing reference from earlier in this boot is dropped: q then maps to
+   * the profile's raw range, and the range generation changes. */
+  runtime.homing_reference_valid[0] = true;
+  runtime.homing_zero_tick[0] = 5000;
+  assert(head_control_position_range(&runtime, &calibration, 0u, &minimum, &maximum));
+  assert(minimum == 4200 && maximum == 5700);
+  runtime.servos[0].present_tick = -1200;
+  const uint8_t generation = runtime.position_range_generation;
+  assert(head_state_request_enable_at_present_pose(&runtime, &calibration) == 0);
+  assert(!runtime.homing_reference_valid[0]);
+  assert(runtime.position_range_generation != generation);
+  assert(head_control_position_range(&runtime, &calibration, 0u, &minimum, &maximum));
+  assert(minimum == -1200 && maximum == 300);
+  assert(runtime.state == HEAD_HOMING_REQUIRED);  /* preparation changes state */
+  runtime.servos[0].present_tick = 300;
+  assert(head_state_request_enable_at_present_pose(&runtime, &calibration) == 0);
+
+  /* Outside the range is refused, never clamped. */
+  runtime.servos[0].present_tick = -1201;
+  assert(head_state_request_enable_at_present_pose(&runtime, &calibration) == -ERANGE);
+  runtime.servos[0].present_tick = 301;
+  assert(head_state_request_enable_at_present_pose(&runtime, &calibration) == -ERANGE);
+  runtime.servos[0].present_tick = 0;
+
+  /* Only from torque-off HOMING_REQUIRED with motion preparation allowed. */
+  runtime.state = HEAD_READY;
+  assert(head_state_request_enable_at_present_pose(&runtime, &calibration) == -EPERM);
+  runtime.state = HEAD_HOMING_REQUIRED;
+  runtime.torque_state = HEAD_TORQUE_ON_VERIFIED;
+  assert(head_state_request_enable_at_present_pose(&runtime, &calibration) == -EPERM);
+  runtime.torque_state = HEAD_TORQUE_OFF_VERIFIED;
+  runtime.discovery_verified = false;
+  assert(head_state_request_enable_at_present_pose(&runtime, &calibration) == -EPERM);
+  runtime.discovery_verified = true;
+  head_state_fault(&runtime, HEAD_FAULT_BUS);
+  assert(head_state_request_enable_at_present_pose(&runtime, &calibration) == -EPERM);
+
+  /* Reinitialising control (profile applied) also changes the generation. */
+  const uint8_t before_init = runtime.position_range_generation;
+  head_control_init(&runtime, &calibration);
+  assert(runtime.position_range_generation != before_init);
+}
+
+/* The lag limit follows the typed current limit, so the servo can be loaded
+ * up to that limit; a low limit keeps the zero-home window as its floor. */
+static void test_tuning_lag_limit_follows_current_limit(void)
+{
+  struct head_calibration calibration;
+  struct head_runtime runtime = {0};
+  make_valid_calibration(&calibration);
+  calibration.joints[0].operating_current_ma = 600;
+  head_config_finalize(&calibration);
+  assert(head_config_validate(&calibration));
+  head_state_init(&runtime);
+  runtime.state = HEAD_HOMING_REQUIRED;
+  runtime.torque_state = HEAD_TORQUE_OFF_VERIFIED;
+  runtime.discovery_verified = true;
+  assert(head_state_request_tuning(&runtime, &calibration, 399u));
+  runtime.state = HEAD_TUNING;
+  runtime.torque_state = HEAD_TORQUE_ON_VERIFIED;
+  runtime.tuning_neutral_tick[0] = 1000;
+  runtime.servos[0].last_current_feedback_ms = 500u;
+
+  /* 399 / 3 = 133 ticks. At 132 ticks of lag (about 400 mA measured, but
+   * under the limit here) a step away is still accepted... */
+  runtime.servos[0].goal_tick = 1300;
+  runtime.servos[0].present_tick = 1300 - 132;
+  runtime.servos[0].present_current_ma = 398;
+  assert(head_state_tuning_step(&runtime, &calibration, 0u, 1, 510u) == 0);
+  /* ...at 133 it is refused, and stepping back still works. */
+  runtime.servos[0].goal_tick = 1300;
+  runtime.servos[0].present_tick = 1300 - 133;
+  assert(head_state_tuning_step(&runtime, &calibration, 0u, 1, 510u) == -EBUSY);
+  assert(head_state_tuning_step(&runtime, &calibration, 0u, -1, 510u) == 0);
+  /* The old fixed 20-tick window no longer stops a loaded servo. */
+  runtime.servos[0].goal_tick = 1300;
+  runtime.servos[0].present_tick = 1300 - 70;
+  runtime.servos[0].present_current_ma = 245;
+  assert(head_state_tuning_step(&runtime, &calibration, 0u, 50, 510u) == 0);
+  /* Reaching the typed limit still refuses, whatever the lag. */
+  runtime.servos[0].present_tick = runtime.servos[0].goal_tick;
+  runtime.servos[0].present_current_ma = 399;
+  assert(head_state_tuning_step(&runtime, &calibration, 0u, 1, 510u) == -EBUSY);
+
+  /* A low limit keeps the floor: 30 / 3 = 10 is raised to 20 ticks. */
+  runtime.tuning_current_limit_ma = 30u;
+  runtime.servos[0].present_current_ma = 0;
+  runtime.servos[0].goal_tick = 1300;
+  runtime.servos[0].present_tick = 1300 - (HEAD_TUNING_MIN_LAG_TICKS - 1);
+  assert(head_state_tuning_step(&runtime, &calibration, 0u, 1, 510u) == 0);
+  runtime.servos[0].goal_tick = 1300;
+  runtime.servos[0].present_tick = 1300 - HEAD_TUNING_MIN_LAG_TICKS;
+  assert(head_state_tuning_step(&runtime, &calibration, 0u, 1, 510u) == -EBUSY);
+}
+
 int main(void)
 {
+  test_tuning_lag_limit_follows_current_limit();
+  test_enable_seeds_requested_positions_exactly();
+  test_enable_at_present_pose_request();
   test_non_finite_calibration_is_rejected();
   test_branch_current_budget();
+  test_profile_declares_branch();
+  test_tuning_request_and_steps();
+  test_tuning_per_servo_limit();
   test_calibration_storage_schema_round_trip();
   test_lease_expiry_and_rollover();
   test_command_validation_and_sequence();

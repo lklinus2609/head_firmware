@@ -1,0 +1,45 @@
+{
+  "format": "head-face-markers-1",
+  "markers": {
+    "modiolus_right": {
+      "xy": [
+        546.8,
+        497.7
+      ],
+      "kind": "dot",
+      "reference": false
+    },
+    "modiolus_left": {
+      "xy": [
+        775.1,
+        497.0
+      ],
+      "kind": "dot",
+      "reference": false
+    },
+    "lower_lip": {
+      "xy": [
+        667.0,
+        539.2
+      ],
+      "kind": "dot",
+      "reference": false
+    },
+    "eye_right": {
+      "xy": [
+        567.2,
+        298.7
+      ],
+      "kind": "hole",
+      "reference": true
+    },
+    "eye_left": {
+      "xy": [
+        763.2,
+        302.1
+      ],
+      "kind": "hole",
+      "reference": true
+    }
+  }
+}

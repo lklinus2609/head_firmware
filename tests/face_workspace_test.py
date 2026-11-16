@@ -80,11 +80,32 @@ def test_jaw_budget_keeps_the_tested_talking_and_caps_more() -> None:
     assert worst / window <= spec.jaw_duty_max + 0.03, worst / window
 
 
+def test_newest_validation_run() -> None:
+    import json
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        records = Path(tmp)
+        assert fw.newest_validation_run(records) is None
+        def run(name, validate):
+            folder = records / "runs" / name
+            folder.mkdir(parents=True)
+            (folder / "record.json").write_text(json.dumps({"validate": {}} if validate else {}))
+            return folder
+        old = run("2026-11-10/211350_face_natural", True)
+        run("2026-11-11/142831_face_natural", False)          # a talking run: not a validation
+        assert fw.newest_validation_run(records) == old
+        new = run("2026-11-11/143538_face_natural", True)
+        assert fw.newest_validation_run(records) == new
+        (records / "runs" / "2026-11-11" / "150000_face_natural").mkdir()   # no record.json yet
+        assert fw.newest_validation_run(records) == new
+
+
 def main() -> None:
     test_spec_round_trip_and_flags()
     test_project_clips_every_dimension()
     test_jaw_budget_allows_pulses_not_holds()
     test_jaw_budget_keeps_the_tested_talking_and_caps_more()
+    test_newest_validation_run()
     print("face workspace: all tests passed")
 
 

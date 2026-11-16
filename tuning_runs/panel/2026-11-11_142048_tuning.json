@@ -1,0 +1,570 @@
+{
+  "format": "head-tuning-record-1",
+  "started_utc": "2026-11-11T20:20:48.973927+00:00",
+  "current_limit_ma": 300,
+  "servos": {
+    "0": {
+      "branch": 1,
+      "neutral_tick": 3150,
+      "peak_current_ma": 8,
+      "marks": {},
+      "note": ""
+    },
+    "1": {
+      "branch": 1,
+      "neutral_tick": 2124,
+      "peak_current_ma": 4,
+      "marks": {},
+      "note": ""
+    },
+    "2": {
+      "branch": 1,
+      "neutral_tick": 89,
+      "peak_current_ma": 0,
+      "marks": {},
+      "note": ""
+    },
+    "3": {
+      "branch": 1,
+      "neutral_tick": 1329,
+      "peak_current_ma": 11,
+      "marks": {},
+      "note": ""
+    },
+    "4": {
+      "branch": 1,
+      "neutral_tick": 3206,
+      "peak_current_ma": 6,
+      "marks": {},
+      "note": ""
+    },
+    "5": {
+      "branch": 0,
+      "neutral_tick": 526,
+      "peak_current_ma": 155,
+      "marks": {},
+      "note": ""
+    },
+    "6": {
+      "branch": 0,
+      "neutral_tick": 563,
+      "peak_current_ma": 146,
+      "marks": {},
+      "note": ""
+    },
+    "7": {
+      "branch": 0,
+      "neutral_tick": 4054,
+      "peak_current_ma": 59,
+      "marks": {},
+      "note": ""
+    },
+    "8": {
+      "branch": 0,
+      "neutral_tick": 580,
+      "peak_current_ma": 16,
+      "marks": {},
+      "note": ""
+    },
+    "9": {
+      "branch": 0,
+      "neutral_tick": 2255,
+      "peak_current_ma": 23,
+      "marks": {},
+      "note": ""
+    },
+    "10": {
+      "branch": 3,
+      "neutral_tick": 199,
+      "peak_current_ma": 0,
+      "marks": {},
+      "note": ""
+    },
+    "11": {
+      "branch": 3,
+      "neutral_tick": 31,
+      "peak_current_ma": 15,
+      "marks": {},
+      "note": ""
+    },
+    "12": {
+      "branch": 3,
+      "neutral_tick": 1340,
+      "peak_current_ma": 3,
+      "marks": {},
+      "note": ""
+    },
+    "13": {
+      "branch": 3,
+      "neutral_tick": 834,
+      "peak_current_ma": 144,
+      "marks": {
+        "neutral": {
+          "utc": "2026-11-11T20:21:44.801693+00:00",
+          "present_tick": 834,
+          "goal_tick": 834,
+          "current_ma": 2
+        }
+      },
+      "note": ""
+    },
+    "14": {
+      "branch": 3,
+      "neutral_tick": 2876,
+      "peak_current_ma": 153,
+      "marks": {
+        "neutral": {
+          "utc": "2026-11-11T20:21:29.219424+00:00",
+          "present_tick": 2024,
+          "goal_tick": 2026,
+          "current_ma": 8
+        }
+      },
+      "note": ""
+    },
+    "15": {
+      "branch": 2,
+      "neutral_tick": 3257,
+      "peak_current_ma": 0,
+      "marks": {},
+      "note": ""
+    },
+    "16": {
+      "branch": 2,
+      "neutral_tick": 3854,
+      "peak_current_ma": 8,
+      "marks": {},
+      "note": ""
+    },
+    "17": {
+      "branch": 2,
+      "neutral_tick": 3227,
+      "peak_current_ma": 155,
+      "marks": {},
+      "note": ""
+    },
+    "18": {
+      "branch": 2,
+      "neutral_tick": 1610,
+      "peak_current_ma": 8,
+      "marks": {},
+      "note": ""
+    },
+    "19": {
+      "branch": 2,
+      "neutral_tick": 522,
+      "peak_current_ma": 20,
+      "marks": {},
+      "note": ""
+    }
+  },
+  "steps": [
+    {
+      "utc": "2026-11-11T20:20:54.052129+00:00",
+      "servo": 14,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 2826,
+      "present_tick": 2876,
+      "current_ma": 5
+    },
+    {
+      "utc": "2026-11-11T20:20:54.212629+00:00",
+      "servo": 14,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 2776,
+      "present_tick": 2831,
+      "current_ma": -17
+    },
+    {
+      "utc": "2026-11-11T20:20:54.372625+00:00",
+      "servo": 14,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 2776,
+      "present_tick": 2779,
+      "current_ma": 4
+    },
+    {
+      "utc": "2026-11-11T20:20:54.532683+00:00",
+      "servo": 14,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 2676,
+      "present_tick": 2729,
+      "current_ma": -13
+    },
+    {
+      "utc": "2026-11-11T20:20:54.692658+00:00",
+      "servo": 14,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 2626,
+      "present_tick": 2678,
+      "current_ma": -11
+    },
+    {
+      "utc": "2026-11-11T20:20:57.672787+00:00",
+      "servo": 14,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 2576,
+      "present_tick": 2628,
+      "current_ma": -8
+    },
+    {
+      "utc": "2026-11-11T20:20:57.852546+00:00",
+      "servo": 14,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 2526,
+      "present_tick": 2579,
+      "current_ma": -15
+    },
+    {
+      "utc": "2026-11-11T20:20:58.012109+00:00",
+      "servo": 14,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 2476,
+      "present_tick": 2529,
+      "current_ma": -4
+    },
+    {
+      "utc": "2026-11-11T20:20:58.172743+00:00",
+      "servo": 14,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 2426,
+      "present_tick": 2478,
+      "current_ma": 13
+    },
+    {
+      "utc": "2026-11-11T20:20:58.312762+00:00",
+      "servo": 14,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 2376,
+      "present_tick": 2431,
+      "current_ma": -17
+    },
+    {
+      "utc": "2026-11-11T20:20:58.492643+00:00",
+      "servo": 14,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 2326,
+      "present_tick": 2378,
+      "current_ma": -16
+    },
+    {
+      "utc": "2026-11-11T20:20:58.652564+00:00",
+      "servo": 14,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 2276,
+      "present_tick": 2329,
+      "current_ma": -11
+    },
+    {
+      "utc": "2026-11-11T20:20:58.832138+00:00",
+      "servo": 14,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 2226,
+      "present_tick": 2279,
+      "current_ma": -8
+    },
+    {
+      "utc": "2026-11-11T20:20:58.991809+00:00",
+      "servo": 14,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 2176,
+      "present_tick": 2228,
+      "current_ma": -5
+    },
+    {
+      "utc": "2026-11-11T20:20:59.152009+00:00",
+      "servo": 14,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 2126,
+      "present_tick": 2178,
+      "current_ma": -8
+    },
+    {
+      "utc": "2026-11-11T20:20:59.312728+00:00",
+      "servo": 14,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 2076,
+      "present_tick": 2129,
+      "current_ma": -18
+    },
+    {
+      "utc": "2026-11-11T20:20:59.473324+00:00",
+      "servo": 14,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 2026,
+      "present_tick": 2079,
+      "current_ma": -8
+    },
+    {
+      "utc": "2026-11-11T20:21:18.392518+00:00",
+      "servo": 17,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 3177,
+      "present_tick": 3227,
+      "current_ma": -10
+    },
+    {
+      "utc": "2026-11-11T20:21:18.552336+00:00",
+      "servo": 17,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 3177,
+      "present_tick": 3181,
+      "current_ma": -17
+    },
+    {
+      "utc": "2026-11-11T20:21:18.732426+00:00",
+      "servo": 17,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 3077,
+      "present_tick": 3132,
+      "current_ma": -15
+    },
+    {
+      "utc": "2026-11-11T20:21:18.892323+00:00",
+      "servo": 17,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 3027,
+      "present_tick": 3082,
+      "current_ma": -15
+    },
+    {
+      "utc": "2026-11-11T20:21:19.072333+00:00",
+      "servo": 17,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 2977,
+      "present_tick": 3026,
+      "current_ma": 13
+    },
+    {
+      "utc": "2026-11-11T20:21:19.232509+00:00",
+      "servo": 17,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 2927,
+      "present_tick": 2981,
+      "current_ma": -14
+    },
+    {
+      "utc": "2026-11-11T20:21:19.392432+00:00",
+      "servo": 17,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 2877,
+      "present_tick": 2931,
+      "current_ma": -12
+    },
+    {
+      "utc": "2026-11-11T20:21:19.632332+00:00",
+      "servo": 17,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 2827,
+      "present_tick": 2877,
+      "current_ma": 0
+    },
+    {
+      "utc": "2026-11-11T20:21:19.812465+00:00",
+      "servo": 17,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 2777,
+      "present_tick": 2830,
+      "current_ma": -4
+    },
+    {
+      "utc": "2026-11-11T20:21:19.972293+00:00",
+      "servo": 17,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 2727,
+      "present_tick": 2780,
+      "current_ma": 4
+    },
+    {
+      "utc": "2026-11-11T20:21:20.172603+00:00",
+      "servo": 17,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 2677,
+      "present_tick": 2730,
+      "current_ma": -9
+    },
+    {
+      "utc": "2026-11-11T20:21:24.252149+00:00",
+      "servo": 14,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 1976,
+      "present_tick": 2025,
+      "current_ma": 2
+    },
+    {
+      "utc": "2026-11-11T20:21:24.472476+00:00",
+      "servo": 14,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 1926,
+      "present_tick": 1979,
+      "current_ma": -8
+    },
+    {
+      "utc": "2026-11-11T20:21:26.252005+00:00",
+      "servo": 14,
+      "step_ticks": 50,
+      "result": 0,
+      "goal_tick": 1976,
+      "present_tick": 1929,
+      "current_ma": -8
+    },
+    {
+      "utc": "2026-11-11T20:21:26.552545+00:00",
+      "servo": 14,
+      "step_ticks": 50,
+      "result": 0,
+      "goal_tick": 2026,
+      "present_tick": 1973,
+      "current_ma": 17
+    },
+    {
+      "utc": "2026-11-11T20:21:39.272892+00:00",
+      "servo": 13,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 784,
+      "present_tick": 833,
+      "current_ma": 7
+    },
+    {
+      "utc": "2026-11-11T20:21:39.492726+00:00",
+      "servo": 13,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 734,
+      "present_tick": 781,
+      "current_ma": -9
+    },
+    {
+      "utc": "2026-11-11T20:21:41.532904+00:00",
+      "servo": 13,
+      "step_ticks": 50,
+      "result": 0,
+      "goal_tick": 784,
+      "present_tick": 736,
+      "current_ma": 3
+    },
+    {
+      "utc": "2026-11-11T20:21:41.731851+00:00",
+      "servo": 13,
+      "step_ticks": 50,
+      "result": 0,
+      "goal_tick": 834,
+      "present_tick": 787,
+      "current_ma": 4
+    },
+    {
+      "utc": "2026-11-11T20:21:47.392518+00:00",
+      "servo": 7,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 4004,
+      "present_tick": 4054,
+      "current_ma": -41
+    },
+    {
+      "utc": "2026-11-11T20:21:49.072248+00:00",
+      "servo": 6,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 513,
+      "present_tick": 562,
+      "current_ma": 13
+    },
+    {
+      "utc": "2026-11-11T20:21:49.191903+00:00",
+      "servo": 6,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 463,
+      "present_tick": 520,
+      "current_ma": -32
+    },
+    {
+      "utc": "2026-11-11T20:21:50.372290+00:00",
+      "servo": 5,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 476,
+      "present_tick": 526,
+      "current_ma": 3
+    },
+    {
+      "utc": "2026-11-11T20:21:50.532058+00:00",
+      "servo": 5,
+      "step_ticks": -50,
+      "result": 0,
+      "goal_tick": 426,
+      "present_tick": 479,
+      "current_ma": 1
+    },
+    {
+      "utc": "2026-11-11T20:21:52.272045+00:00",
+      "servo": 5,
+      "step_ticks": 50,
+      "result": 0,
+      "goal_tick": 476,
+      "present_tick": 430,
+      "current_ma": -15
+    },
+    {
+      "utc": "2026-11-11T20:21:52.531984+00:00",
+      "servo": 5,
+      "step_ticks": 50,
+      "result": 0,
+      "goal_tick": 526,
+      "present_tick": 472,
+      "current_ma": 39
+    },
+    {
+      "utc": "2026-11-11T20:21:52.891976+00:00",
+      "servo": 5,
+      "step_ticks": 50,
+      "result": 0,
+      "goal_tick": 576,
+      "present_tick": 523,
+      "current_ma": 14
+    },
+    {
+      "utc": "2026-11-11T20:21:53.232059+00:00",
+      "servo": 5,
+      "step_ticks": 50,
+      "result": 0,
+      "goal_tick": 626,
+      "present_tick": 572,
+      "current_ma": 17
+    }
+  ],
+  "faults": [],
+  "telemetry_file": "2026-11-11_142048_tuning.telemetry.csv"
+}

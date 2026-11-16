@@ -154,6 +154,47 @@ def test_take_in_gives_up_when_the_corner_never_moves() -> None:
     assert 100 + kt.CAM_NO_MOTION_TICKS <= travel < 1500, travel
 
 
+def test_take_in_stops_at_the_end_mark() -> None:
+    """2026-11-11 run 165618: line 14 went 53 ticks past its end mark. A
+    take-in now stops at the operator's end mark, whatever --max-travel says."""
+    import tempfile
+    import time as time_module
+    import face_stream as fs
+    import jaw_probe
+    import sweep_runner
+    import tuning_core
+    import workspace_guard as wg
+    assert kt.pull_end_marks({14: {"neutral": {"present_tick": 2024}, "end_1": {"present_tick": 3154}},
+                              8: {"neutral": {"present_tick": 589}, "end_1": {"present_tick": 900}},
+                              11: {"end_1": {"present_tick": 500}}}) == {14: 3154, 11: 500}
+    board = fs.face_preview_controller()
+    board.tendons[14] = (1, 10**6, 0.2, 0.0)             # the line never gets tight
+    link = tuning_core.TuningLink(board)
+    link.connect()
+
+    class StillWatch:
+        def poll(self):
+            time_module.sleep(0.01)
+            return time_module.monotonic(), 0.15
+
+    with tempfile.TemporaryDirectory() as directory:
+        runner = sweep_runner.Runner(link, dict(board.active_servos), Path(directory), 650,
+                                     dict(tuning_core.SWEEP_BOX_DEFAULTS), Path(directory) / "STOP",
+                                     say=lambda _text: None)
+        assert runner.start()
+        probe = jaw_probe.Probe(runner, wg.JAW, dict(wg.PULL), 280, None, Path(directory))
+        test = kt.KneeTest(probe, 10, 80, 1500, say=lambda _text: None, slack=100)
+        start = link.state.servos[14].goal_tick
+        test.end_marks = {14: start + 120 * wg.PULL[14]}
+        result = test.take_in(14, StillWatch())
+        reached = max(wg.PULL[14] * (row[1] - start) for row in result["curve"])
+        test.end_marks = {14: link.state.servos[14].goal_tick - 50 * wg.PULL[14]}   # already past
+        past = test.take_in(14, StillWatch())
+        runner.disable(); runner.close()
+    assert reached <= 120 and "120 ticks" in result["stopped_by"], (reached, result["stopped_by"])
+    assert "0 ticks" in past["stopped_by"], past["stopped_by"]
+
+
 def test_find_slack_by_load() -> None:
     """A tight line pays out, a line wound the other way (negative load) is
     taken in, a slack line stays; none ends wound the other way."""
@@ -202,6 +243,7 @@ def main() -> None:
     test_take_in_stops_on_the_camera()
     test_take_in_gives_up_when_the_corner_never_moves()
     test_find_slack_by_load()
+    test_take_in_stops_at_the_end_mark()
     print("knee finder: all tests passed")
 
 

@@ -442,8 +442,13 @@ firmware/scripts/head-sweep --preview --limit 600 --sweep 0:1 --sweep 40:2
   `record.json` in its run folder; `--camera realsense` records it as well.
 
   ```sh
-  scripts/head-knee --limit 650 --camera realsense
+  scripts/head-knee --limit 650 --camera realsense --jaw-tick 4000
   ```
+
+  `--jaw-tick` moves the jaw to that tick (4000 +-30; at most
+  `--jaw-push-ma`, default 60 mA) and holds it there for the test. Without
+  it the jaw stays where it rests, and head-face refuses knees found with
+  the jaw more than 30 ticks from 4000.
 
   With `--camera realsense` the knee comes from the camera (since
   2026-10-21): the slack picture of each mouth corner is the reference, and
@@ -469,6 +474,13 @@ firmware/scripts/head-sweep --preview --limit 600 --sweep 0:1 --sweep 40:2
   `--jaw-release down=N` pays the down lines out N ticks at the fully open
   jaw goal, in proportion to the jaw's measured position (the open-jaw
   neutral moves toward slack); see `firmware/docs/NATURAL_FACE_AND_JAW_WORKSPACE.md`.
+  N may be up to a geometric cap (2026-11-11): 90 mm (modiolus to jaw axis,
+  operator from CAD) / 8.1 mm (line horn) = 11.1 horn ticks per jaw tick,
+  times the session's jaw span (4000 to the jaw open goal), at most one turn
+  (4095): 3333 ticks for the open goal 3700. The cap is the rigid,
+  straight-along-the-line case, an upper bound; the measured zero-load
+  release is much smaller (about 25 / 12 ticks for lines 8 / 9 per 300 jaw
+  goal ticks, 2026-11-10).
 - `firmware/scripts/head-natural` (`natural_face.py`) runs the natural face:
   eye saccades (0/2 together, 1 pitch), blinks (5/6), a fake smile (up + diag,
   no oculi) and talking jaw syllables in phrases, all at once, inside the panel
@@ -490,9 +502,24 @@ firmware/scripts/head-sweep --preview --limit 600 --sweep 0:1 --sweep 40:2
   the jaw goes through `face_workspace.JawBudget`.
 
   `--say TEXT` (2026-11-11, `speech_face.py`; simulator only so far) speaks a
-  text instead of the random syllables. eSpeak NG (`libespeak-ng.so.1`)
-  makes the audio and the time of each phoneme (moved 45 ms earlier: the
-  events lag the sound, measured on 103 stops); each phoneme maps to a viseme
+  text instead of the random syllables. `--tts` picks the speech engine,
+  which makes the audio and the time of each phoneme (2026-11-11):
+
+  - `piper` (default): local neural voice (piper-tts 1.8.0 in `bench/.venv`,
+    models in `bench/piper_voices/`). Phoneme times come from Piper's
+    alignments (the durations that make the audio). `--voice female`
+    (default, `en_US-ljspeech-high`), `--voice male` (`en_US-norman-medium`),
+    any installed name, or a path to an `.onnx` model. `--speed` 0.5-2.
+  - `elevenlabs`: cloud voice; **sends the text to ElevenLabs**. Needs
+    `ELEVENLABS_API_KEY`. `--list-voices` prints the voice ids; `--voice
+    VOICE_ID`. ElevenLabs times characters, not phonemes, so eSpeak NG gives
+    the phonemes and each word is stretched onto ElevenLabs' time for its
+    characters. Not yet run against the real API.
+  - `espeak`: eSpeak NG (`libespeak-ng.so.1`), the voice of demos 18/19;
+    `--voice` (default en-us), `--wpm`, `--pitch`. Its phoneme events are
+    moved 45 ms earlier (they lag the sound, measured on 103 stops).
+
+  `--list-voices` shows the voices for `--tts`. Each phoneme maps to a viseme
   (jaw, corner spread, rounding, p/b/m seal; table chosen, not tuned on the
   head), which the mouth starts 70 ms before the sound, reaches in up to
   80 ms and holds. The jaw also follows the audio loudness (35 %). Spread adds
@@ -503,8 +530,8 @@ firmware/scripts/head-sweep --preview --limit 600 --sweep 0:1 --sweep 40:2
   with `--camera realsense` the run also writes `video_with_audio.webm`
   (the audio placed by video frame count and sped up by the camera's real
   frame rate, about 14.9 for 15 fps). `--lips` also presses the lower and upper
-  lips for p/b/m (their effect on this head is not measured). `--voice`,
-  `--wpm`, `--pitch`, `--speech-at`, `--no-audio`; `--seconds` defaults to
+  lips for p/b/m (their effect on this head is not measured).
+  `--speech-at`, `--no-audio`; `--seconds` defaults to
   just long enough for the text.
 
   ```sh
@@ -513,7 +540,9 @@ firmware/scripts/head-sweep --preview --limit 600 --sweep 0:1 --sweep 40:2
 - `face_workspace.py` is the commandable workspace for ML policies:
   `WorkspaceSpec` (measured limits; `tuning_runs/config/face_workspace.json`),
   `project()` clips any action, `JawBudget` allows the jaw past its static
-  limit only in short pulses with a duty limit.
+  limit only in short pulses with a duty limit. `face_workspace.py --report
+  [RUN]` writes `workspace_validation.json` for a `head-natural --validate`
+  run; without RUN it takes the newest validation run (2026-11-11).
 - `firmware/scripts/head-jawcorner run [head-face args]` steps the jaw
   0 -> 0.5 -> 1 -> 0 in each of seven corner poses (keyframes, head-face
   safety); `head-jawcorner report RUN` gives per hold each line's position from

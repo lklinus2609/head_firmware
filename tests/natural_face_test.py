@@ -281,6 +281,31 @@ def test_validate_plan_is_stratified_and_holds_each_pose() -> None:
     assert plan.face(plan.settings.seconds + 0.1) is None
 
 
+def test_jaw_release_geometric_cap() -> None:
+    # 90 mm / 8.1 mm = 11.1 horn ticks per jaw tick; one turn at most.
+    assert abs(fs.JAW_RELEASE_PER_JAW_TICK - 90.0 / 8.1) < 1e-12
+    assert fs.jaw_release_max_ticks(3700) == int(300 * 90.0 / 8.1) == 3333
+    assert fs.jaw_release_max_ticks(3880) == int(120 * 90.0 / 8.1)
+    assert fs.jaw_release_max_ticks(3600) == fs.JAW_RELEASE_MAX_TICKS == 4095   # 4444 capped
+    assert fs.jaw_release_max_ticks(4100) == 0
+    import io
+    import tempfile
+    from contextlib import redirect_stdout
+    with tempfile.TemporaryDirectory() as tmp:
+        # The preview session's own jaw span gives the cap; one tick over is refused.
+        cap = fs.jaw_release_max_ticks(fs.preview_neutrals().jaw_open_limit)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = nf.main(["--preview", "--records", tmp, "--seconds", "10", "--no-talk",
+                            "--jaw-release", f"8={cap + 1}"])
+        assert code == 2 and "geometric cap" in out.getvalue(), out.getvalue()[-300:]
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = nf.main(["--preview", "--records", tmp, "--seconds", "10", "--no-talk",
+                            "--jaw-release", f"8={min(cap, 500)}"])
+        assert code == 0, out.getvalue()[-400:]
+
+
 def main() -> None:
     test_plan_is_repeatable_and_bounded()
     test_eye_targets_stay_inside_the_marks()
@@ -293,6 +318,7 @@ def main() -> None:
     test_enable_retries_once_after_a_bus_fault_with_torque_off()
     test_explore_covers_the_action_space_on_the_simulated_board()
     test_validate_plan_is_stratified_and_holds_each_pose()
+    test_jaw_release_geometric_cap()
     print("natural face: all tests passed")
 
 

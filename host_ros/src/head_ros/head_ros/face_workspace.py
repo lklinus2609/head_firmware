@@ -244,14 +244,43 @@ def validation_report(run: Path) -> dict:
             "servos": servos, "jaw_goal_vs_reached_open_ticks_ma": jaw}
 
 
+DEFAULT_RECORDS = Path(__file__).resolve().parents[4] / "tuning_runs"
+LATEST = "latest"
+
+
+def newest_validation_run(records: Path = DEFAULT_RECORDS) -> Optional[Path]:
+    """The newest runs/<date>/<time>_face_natural folder whose record.json is
+    from head-natural --validate (folders sort by date and time); None if
+    there is none."""
+    for record in sorted((Path(records) / "runs").glob("*/*_face_natural/record.json"), reverse=True):
+        try:
+            if "validate" in json.loads(record.read_text()):
+                return record.parent
+        except (OSError, ValueError):
+            continue
+    return None
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--write", type=Path, help="write the measured default spec here")
     parser.add_argument("--show", type=Path, help="print a spec file and its session flags")
-    parser.add_argument("--report", type=Path, metavar="RUN",
-                        help="validation report of a head-natural --validate run folder")
+    parser.add_argument("--report", nargs="?", const=LATEST, metavar="RUN",
+                        help="validation report of a head-natural --validate run folder; "
+                             "without RUN, the newest such run")
+    parser.add_argument("--records", type=Path, default=DEFAULT_RECORDS,
+                        help="tuning_runs folder searched by --report without RUN")
     a = parser.parse_args(argv)
+    if a.report == LATEST:
+        found = newest_validation_run(a.records)
+        if found is None:
+            print(f"No head-natural --validate run with a record.json under {a.records / 'runs'}.")
+            return 2
+        print(f"Newest validation run: {found}")
+        a.report = found
+    elif a.report is not None:
+        a.report = Path(a.report)
     if a.write:
         a.write.parent.mkdir(parents=True, exist_ok=True)
         a.write.write_text(json.dumps(WorkspaceSpec().to_json(), indent=1) + "\n")

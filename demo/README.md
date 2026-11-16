@@ -33,6 +33,10 @@ The originals stay in their run folders, where `record.json` and
 | `15_lid-ladder.webm` | Both lids stepped to 0.3 ... 1.0 of their closed mark: the right lid covers the eye at 0.4-0.6, the left only at 1.0. 19 s. | `runs/2026-11-10/204310_face_natural` |
 | `16_eyes-and-lids-tour.webm` | Eye and lid range-of-motion tour at 2500 ticks/s: each eye, pitch, each lid, both together, two blinks. 26 s. | `runs/2026-11-10/185607_eyes` |
 | `17_duchenne-smile-new-head.webm` | Duchenne smile tour on the new head, half modiolus range, 2500 ticks/s. 30 s. | `runs/2026-11-10/193559_face_duchenne` |
+| `18_talking-with-speech.webm` | Speaking a sentence (`head-natural --say`, eSpeak NG audio in the video): jaw and lip corners follow the visemes, eyes look away and back at phrase starts, blinks at phrase ends, weak fake smile (0.3 / 0.25). Jaw opens up to 114 ticks (the mechanical limit), so the mouth motion is small. First take that finished, after the drop-check settle window (commit c6b03d9). 22 s. | `runs/2026-11-11/142831_face_natural` |
+| `19_talking-more-mouth.webm` | The same sentence with more mouth motion: `--articulation 2`, the lower lips moving with the jaw (`--lips`; servos 3/4 pull the lower lip down) and the down lines released 1250 ticks at full jaw. Jaw opens up to 167 ticks (was 114), lower lips use 400 ticks; lines <= 124 mA, jaw <= 570 mA, 41 C. | `runs/2026-11-11/180942_face_natural` |
+| `20_talking-more-mouth-piper-female.webm` | The same take as 19 with a **Piper neural voice** (`en_US-ljspeech-high`, female preset) in place of eSpeak NG. **Audio added after the run, not played live:** the mouth motion was planned from the eSpeak timing, so the Piper audio (asked at speed 0.76) was cut at each word and time-stretched (WSOLA, pitch kept) onto the eSpeak word times the mouth used, then placed like the original (offset 7.105 s, camera 14.90 fps). Stretch inside words 0.76-1.75x. 22 s. | `runs/2026-11-11/180942_face_natural` (video.webm) |
+| `21_talking-more-mouth-piper-male.webm` | As 20 with the male preset (`en_US-norman-medium`, speed 0.83; stretch inside words 0.60-1.72x). Audio added after the run, not played live. 22 s. | `runs/2026-11-11/180942_face_natural` (video.webm) |
 
 Not included: a sad face. None of the sad takes was accepted (the corners did
 not go down convincingly).
@@ -47,11 +51,38 @@ first find new neutrals with the knee test (`--max-travel 650` keeps line 14
 inside its end mark, operator marks of 2026-11-11):
 
 ```sh
-scripts/head-knee --limit 650 --camera realsense --down-clearance 800 --down-max-travel 2000 --max-travel 650
+scripts/head-knee --limit 650 --camera realsense --down-clearance 800 --down-max-travel 2000 --max-travel 650 --jaw-tick 4000
 ```
 
+`--jaw-tick 4000` moves the jaw to 4000 and holds it there for the test:
+the face scripts take only knees found with the jaw at 4000 +-30, and on
+2026-11-11 the jaw rested at 4054 with torque off. When the jaw cannot get
+there at the default 60 mA push, the test stops and says so; then give it
+more with `--jaw-push-ma` (below 400, the jaw guard).
+
+Run the knee test at the start of every demo session (it takes about one
+minute). A `neutrals.json` from an earlier session cannot be reused: it
+stores the controller session, and the face scripts refuse it after any
+controller restart (USB unplugged, 12 V or Teensy power cycled, reflash),
+because the servo turn counts can jump by one turn then. Even in one session
+the corner lines drift (60-250 ticks between runs on 2026-11-11), so fresh
+knees are safer.
+
 In the commands below, `<KNEE>` is the run folder that the knee test prints
-(for example `2026-11-11/125829_knee`).
+(for example `2026-11-11/125829_knee`). The `--neutrals ...` part may be left
+out: the face scripts then use the newest `neutrals.json` under
+`tuning_runs/runs/` (that is, the last knee test).
+
+After a `--validate` run (take 12), the workspace report of the newest
+validation run needs no folder:
+
+```sh
+python3 host_ros/src/head_ros/head_ros/face_workspace.py --report
+```
+
+The camera is needed only for the knee test (it finds the knees and writes
+`neutrals.json`). The demo commands run without it: leave out
+`--camera realsense` (default `none`); then there is no video and no stills.
 
 `10_natural-face` (run 205555):
 
@@ -105,7 +136,20 @@ scripts/head-face --neutrals tuning_runs/runs/<KNEE>/neutrals.json --demo duchen
 Videos 01-09 were recorded on the old head; their commands do not apply to
 the new head.
 
-Not recorded yet: a talking take with speech (`head-natural --say`, built
-2026-11-11). On the head it stopped about 1.5 s into the speech three times
-(runs 124404, 125342, 130153, magnet-drop check on lines 14, 14, 19), and the
-right corner lines drift slacker between runs.
+`18_talking-with-speech` (run 142831):
+
+```sh
+scripts/head-natural --neutrals tuning_runs/runs/<KNEE>/neutrals.json --range up=350 --range diag=290 --range down=150 --camera realsense --seed 1 --smile 0.3 --smile-diag 0.25 --tts espeak --say "Hello! My name is Head. I can blink, look around, and smile while I talk. Can you see my lips move?"
+```
+
+`19_talking-more-mouth` (run 180942):
+
+```sh
+scripts/head-natural --neutrals tuning_runs/runs/<KNEE>/neutrals.json --range up=350 --range diag=290 --range down=150 --camera realsense --seed 1 --smile 0.3 --smile-diag 0.25 --articulation 2 --lips --jaw-release 8=1250 --jaw-release 9=1250 --tts espeak --say "Hello! My name is Head. I can blink, look around, and smile while I talk. Can you see my lips move?"
+```
+
+The audio plays from the PC (aplay); with `--camera realsense` the run also
+writes `video_with_audio.webm` in its run folder. Before the drop-check
+settle window, three takes (runs 124404, 125342, 130153) stopped about 1.5 s
+into the speech (magnet-drop check on lines 14, 14, 19). The right corner
+lines still drift slacker between runs, so run the knee test first.

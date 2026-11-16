@@ -29,7 +29,20 @@ camera knee, neutrals.json is written for head-face (kind
 jaw closed only (holding it open on slack lines for a minute would take about
 300 mA, near where it ran hot), so the open-jaw neutrals are a copy.
 
-The jaw holds where it is. Same session and stops as head-ranges (panel
+The jaw holds where it is, unless --jaw-tick is given: then the down lines
+(8, 9: they hold the jaw) are first made slack, the jaw is moved slowly to
+that tick (pushing at most --jaw-push-ma) and held there for the whole test,
+and every line's slack is then found again at that jaw. head-face only takes
+camera knees found with the jaw within JAW_TICK_TOLERANCE of
+wg.JAW_CLOSED_TICK (4000), and on 2026-11-11 the jaw rested at 4054 with
+torque off, so:
+
+    scripts/head-knee --limit 650 --camera realsense --jaw-tick 4000
+
+The test stops when the jaw does not get there, and writes no session
+neutral file when the jaw has moved out of that window by the end.
+
+Same session and stops as head-ranges (panel
 closed; Ctrl-C, SIGTERM or the stop file turn torque off, as do back-off, the
 jaw guard, a board fault, or --abort-ma on any line). Torque goes off at the
 end. Writes record.json in its run folder (runs/<date>/<time>_knee/); with
@@ -132,6 +145,11 @@ SLACK_MAX_TICKS = 1500
 # limit). New head 2026-11-09: the operator's panel open mark for the jaw
 # (2026-11-09_152443_tuning.json, end_1 3939); 3900 on the old head.
 JAW_OPEN_TICK = 3939
+# head-face takes camera knees found with the closed jaw this close to
+# wg.JAW_CLOSED_TICK (face_stream, the closed-jaw slice check).
+JAW_TICK_TOLERANCE = 30
+# --jaw-tick: the jaw's push while it moves (the sweep box default).
+JAW_PUSH_MA = int(tuning_core.SWEEP_BOX_DEFAULTS["jaw_push_ma"])
 
 
 def find_knee(samples: Sequence[Tuple[int, int]], baseline_ticks: int = BASELINE_TICKS,
@@ -289,6 +307,11 @@ class KneeTest:
         # Servo -> its own take-in stop (mA), for a line with more friction
         # (line 9: about 40-45 mA while moving, 2026-10-22).
         self.stop_ma_by_servo: Dict[int, int] = {}
+        # Servo -> the operator's panel end mark in its pull direction. A
+        # take-in never goes past it (operator rule: stay within the marked
+        # ends; 2026-11-11 run 165618 took line 14 53 ticks past its end
+        # mark 3154 because --max-travel was set for an older start).
+        self.end_marks: Dict[int, int] = {}
 
     def take_in(self, index: int, watch: Optional[CornerWatch] = None,
                 max_travel: Optional[int] = None, no_motion_ticks: Optional[int] = None) -> dict:
@@ -301,6 +324,12 @@ class KneeTest:
         pull = wg.PULL[index]
         start = self.link.state.servos[index]
         start_present, start_goal = start.present_tick, start.goal_tick
+        if index in self.end_marks:
+            room = pull * (self.end_marks[index] - start_goal)
+            if room < max_travel:
+                self.say(f"  {index}: at most {max(0, room)} ticks in (end mark "
+                         f"{self.end_marks[index]})")
+            max_travel = max(0, min(max_travel, room))
         curve: List[List[int]] = []
         camera: List[List[float]] = []          # [frame time, travel, motion px]
         seen = float("-inf")
@@ -512,6 +541,22 @@ def camera_session_neutral(log: dict, session_id: Optional[int], preload_ma: int
             "closed": closed, "open": dict(closed)}
 
 
+def pull_end_marks(marks: Dict[int, Dict[str, dict]]) -> Dict[int, int]:
+    """Face line -> its panel end mark tick, for the lines whose end_1 lies in
+    their pull direction from their neutral mark (or that have no neutral
+    mark). Marks as tuning_core.load_earlier_marks gives them."""
+    out: Dict[int, int] = {}
+    for index, pull in wg.PULL.items():
+        line = marks.get(index) or {}
+        end = (line.get("end_1") or {}).get("present_tick")
+        if end is None:
+            continue
+        neutral = (line.get("neutral") or {}).get("present_tick")
+        if neutral is None or pull * (end - neutral) > 0:
+            out[index] = int(end)
+    return out
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -543,8 +588,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--other-sides-from", type=Path,
                         help="an earlier knee run's record.json (same boot) whose camera knees fill in "
                              "the sides not tested now, for the session neutral file")
+    parser.add_argument("--jaw-tick", type=int,
+                        help=f"move the jaw to this tick and hold it there for the test "
+                             f"({wg.JAW_CLOSED_TICK - JAW_TICK_TOLERANCE} to "
+                             f"{wg.JAW_CLOSED_TICK + JAW_TICK_TOLERANCE}; default: the jaw stays "
+                             f"where it rests)")
+    parser.add_argument("--jaw-push-ma", type=int, default=JAW_PUSH_MA,
+                        help=f"--jaw-tick: the jaw's largest push while it moves (default "
+                             f"{JAW_PUSH_MA}; below the jaw guard's {tuning_core.JAW_HOLD_MA})")
     add_jaw_arguments(parser)
     a = parser.parse_args(argv)
+    if a.jaw_tick is not None and (
+            abs(a.jaw_tick - wg.JAW_CLOSED_TICK) > JAW_TICK_TOLERANCE
+            or not tuning_core.LAG_MA_PER_TICK <= a.jaw_push_ma < tuning_core.JAW_HOLD_MA):
+        print(f"Need --jaw-tick {wg.JAW_CLOSED_TICK - JAW_TICK_TOLERANCE} to "
+              f"{wg.JAW_CLOSED_TICK + JAW_TICK_TOLERANCE} and --jaw-push-ma "
+              f"{tuning_core.LAG_MA_PER_TICK} to {tuning_core.JAW_HOLD_MA - 1}.")
+        return EXIT_NOT_STARTED
     one_turn = tuning_core.headctl_one_turn_ticks()
     if not (0 <= a.slack <= 300 and 1 <= a.step <= 10 and 0 < a.stop_ma < a.abort_ma
             and a.slack < a.max_travel <= 2000 and 0 <= a.down_clearance <= 2000
@@ -592,6 +652,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                   a.jaw_abort_ma or 600)
     test = KneeTest(probe, a.step, a.stop_ma, a.max_travel, say, slack=a.slack,
                     no_motion_ticks=a.no_motion_ticks)
+    if not a.preview:
+        test.end_marks = pull_end_marks(
+            tuning_core.load_earlier_marks(records, since=tuning_core.HEAD_MARKS_SINCE)[0])
+        if test.end_marks:
+            say("End marks (no take-in past them): "
+                + " ".join(f"{i}:{t}" for i, t in sorted(test.end_marks.items())))
     for item in a.stop_ma_servo:
         servo, _, ma = item.partition("=")
         if not (servo.isdigit() and int(servo) in wg.PULL and ma.isdigit() and
@@ -611,6 +677,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     log["stop_ma_by_servo"] = {str(k): v for k, v in test.stop_ma_by_servo.items()}
     log["down_clearance"] = a.down_clearance
     log["down_max_travel"] = a.down_max_travel
+    log["jaw_target"] = a.jaw_tick
+    log["jaw_push_ma"] = a.jaw_push_ma if a.jaw_tick is not None else None
     code = EXIT_FINISHED
     watches = ({side: CornerWatch(recorder, CORNER_REGIONS[side]) for side in wg.SIDES}
                if recorder is not None else {})
@@ -624,7 +692,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not runner.start():
             return EXIT_NOT_STARTED
         state = link.state
-        log["jaw_tick"] = state.servos[wg.JAW].present_tick
+        log["jaw_rest_tick"] = state.servos[wg.JAW].present_tick
+        log["jaw_tick"] = log["jaw_rest_tick"]
+        if a.jaw_tick is not None:
+            down_lines = [wg.SIDES[side]["down"] for side in wg.SIDES]
+            say(f"Jaw rests at {log['jaw_rest_tick']}; down lines {down_lines} to slack, "
+                f"then the jaw to {a.jaw_tick} (push at most {a.jaw_push_ma} mA)...")
+            reason, log["jaw_slack_found"] = test.find_slack(down_lines, a.slack)
+            if reason is not None:
+                return stop(reason)
+            reason = probe.jaw_to(a.jaw_tick, a.jaw_push_ma, "jaw")
+            if reason is not None:
+                return stop(reason)
+            reached = link.state.servos[wg.JAW].present_tick
+            log["jaw_reached_tick"] = reached
+            if abs(reached - wg.JAW_CLOSED_TICK) > JAW_TICK_TOLERANCE:
+                return stop(f"the jaw stopped at {reached}, not within {JAW_TICK_TOLERANCE} of "
+                            f"{wg.JAW_CLOSED_TICK} (push at most {a.jaw_push_ma} mA)")
         say("Finding each line's slack by its load...")
         reason, log["slack_found"] = test.find_slack(list(wg.PULL), a.slack)
         if reason is not None:
@@ -632,6 +716,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         missing = [i for i, line in log["slack_found"].items() if not line["found"]]
         if missing:
             return stop(f"no slack found for lines {missing}")
+        if a.jaw_tick is not None:
+            log["jaw_tick"] = link.state.servos[wg.JAW].present_tick
+            say(f"Jaw at {log['jaw_tick']} ({link.state.servos[wg.JAW].current_ma:+d} mA)")
         reason = probe.wait(0.5)                      # let the skin settle at rest
         if reason is not None:
             return stop(reason)
@@ -754,7 +841,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                     log["sides"][side] = dict(earlier["sides"][side],
                                               merged_from=a.other_sides_from.name)
                     say(f"  {side} side taken from {a.other_sides_from.name}")
-        if watches:
+        jaw_end = link.state.servos[wg.JAW].present_tick
+        log["jaw_end_tick"] = jaw_end
+        say(f"Jaw at the end: {jaw_end} (at the start of the knees: {log['jaw_tick']})")
+        if watches and a.jaw_tick is not None and \
+                abs(jaw_end - wg.JAW_CLOSED_TICK) > JAW_TICK_TOLERANCE:
+            say(f"No session neutral file: the jaw moved to {jaw_end} during the test, "
+                f"out of {wg.JAW_CLOSED_TICK} +-{JAW_TICK_TOLERANCE}.")
+        elif watches:
             data = camera_session_neutral(log, getattr(device, "session_id", None),
                                           wg.PRELOAD_MA)
             if data is None:

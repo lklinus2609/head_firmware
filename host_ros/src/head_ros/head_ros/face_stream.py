@@ -86,8 +86,26 @@ TEMP_STOP_C = 52
 # --jaw-release ROLE=TICKS: a role's lines' neutral moves this far toward
 # slack at the fully open jaw (j = 1), in proportion to the jaw opening
 # (operator, 2026-11-10: the corner down line must release as the jaw opens).
-# The most allowed (chosen, not measured).
-JAW_RELEASE_MAX_TICKS = 400
+# The most allowed is geometric (operator, 2026-11-11): a modiolus point
+# JAW_MODIOLUS_RADIUS_MM from the jaw axis moves r x theta when the jaw turns
+# theta; a line horn of LINE_HORN_RADIUS_MM takes in r_horn x phi. Jaw and
+# line servos both have 4096 ticks per turn, so a line never needs more than
+# r / r_horn horn ticks per jaw tick (the modiolus moving rigidly with the
+# jaw, straight along the line). Radius 90 mm: operator, from the CAD
+# (modiolus vertex to jaw face 88.4-117.3 mm, 2026-11-11). Horn 8.1 mm:
+# tendon-horn measure. Never more than one turn (operator rule).
+JAW_MODIOLUS_RADIUS_MM = 90.0
+LINE_HORN_RADIUS_MM = 8.1
+JAW_RELEASE_PER_JAW_TICK = JAW_MODIOLUS_RADIUS_MM / LINE_HORN_RADIUS_MM
+JAW_RELEASE_MAX_TICKS = 4095
+
+
+def jaw_release_max_ticks(jaw_open_tick: int) -> int:
+    """The largest --jaw-release for a session whose jaw goes from
+    wg.JAW_CLOSED_TICK to jaw_open_tick (j = 1): the geometric bound
+    JAW_RELEASE_PER_JAW_TICK x the jaw span, at most JAW_RELEASE_MAX_TICKS."""
+    span = max(0, wg.JAW_CLOSED_TICK - int(jaw_open_tick))
+    return min(JAW_RELEASE_MAX_TICKS, int(span * JAW_RELEASE_PER_JAW_TICK))
 # Servos driven through FaceSession.extra (eyes, lids): their envelope is
 # their limits plus this margin (as eye_tour.ENVELOPE_MARGIN_TICKS).
 EXTRA_ENVELOPE_MARGIN_TICKS = 20
@@ -274,7 +292,8 @@ def session_envelope(profile: dict, neutrals: SessionNeutrals, present: Dict[int
                      jaw_current_ma: Optional[int] = None,
                      jaw_speed_tps: Optional[float] = None,
                      line_speed_tps: Optional[float] = None,
-                     extra_limits: Optional[Dict[int, Tuple[int, int, int, float]]] = None
+                     extra_limits: Optional[Dict[int, Tuple[int, int, int, float]]] = None,
+                     extra_currents: Optional[Dict[int, int]] = None
                      ) -> Tuple[dict, List[str]]:
     """A copy of the board's profile with min..max (and home) set for this
     session, and one note per servo it changed. Raises ValueError when a face
@@ -350,6 +369,11 @@ def session_envelope(profile: dict, neutrals: SessionNeutrals, present: Dict[int
                 jaw_current_ma != slot["operating_current_ma"]:
             notes.append(f"servo {index}: current {slot['operating_current_ma']} -> {jaw_current_ma} mA")
             slot["operating_current_ma"] = int(jaw_current_ma)
+        if extra_currents and index in extra_currents and \
+                extra_currents[index] != slot["operating_current_ma"]:
+            notes.append(f"servo {index}: current {slot['operating_current_ma']} -> "
+                         f"{extra_currents[index]} mA")
+            slot["operating_current_ma"] = int(extra_currents[index])
         speed = (jaw_speed_tps if index == wg.JAW else
                  extra_limits[index][3] if index in extra_limits else
                  line_speed_tps if index in wg.PULL or index in wg.UPPER_PULL else None)
@@ -803,6 +827,11 @@ class ExtraServos:
                approaching: bool) -> Tuple[Dict[int, int], Optional[str]]:
         raise NotImplementedError
 
+    def currents(self) -> Dict[int, int]:
+        """Servo -> its current cap (mA) for this session (operating_current_ma
+        in the session envelope, at most 910); empty: keep the board's."""
+        return {}
+
 
 def with_jaw_release(neutrals: SessionNeutrals, release: Dict[str, int]) -> SessionNeutrals:
     """The neutrals with each line's open-jaw neutral moved toward slack from
@@ -947,7 +976,8 @@ class FaceSession:
                                               self.upper_spans, self.jaw_current_ma,
                                               self.speeds["jaw_speed_tps"],
                                               self.speeds["line_speed_tps"],
-                                              self.extra.limits(present) if self.extra else None)
+                                              self.extra.limits(present) if self.extra else None,
+                                              self.extra.currents() if self.extra else None)
         except ValueError as error:
             raise RuntimeError(f"no session envelope: {error}") from error
         # self.records is the run's folder (records_layout.run_dir).
@@ -1533,7 +1563,8 @@ def add_session_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--jaw-release", action="append", default=[], metavar="ROLE=TICKS",
                         help="pay a role's lines (down diag up) or one line (8 9 11 14 15 19) out "
                              "this far at the fully open jaw goal, in proportion to the measured "
-                             f"opening (repeat; 0-{JAW_RELEASE_MAX_TICKS}; a line's own value wins)")
+                             f"opening (repeat; 0 to the geometric cap {JAW_RELEASE_PER_JAW_TICK:.1f} "
+                             f"x the jaw span, at most {JAW_RELEASE_MAX_TICKS}; a line's own value wins)")
     parser.add_argument("--hold-upper-lips", action="store_true",
                         help="do not drive the upper lips 13/18 (they hold their pose), even "
                              "when the panel marks would turn them on")
@@ -1665,6 +1696,13 @@ def open_session(a: argparse.Namespace, kind: str, label: str, say=print,
     upper_ranges = _role_ticks(a.upper_range, complete_upper_ranges(UPPER_SESSION_RANGES),
                                wg.UPPER_RANGES, "--upper-range")
     measured = neutrals
+    open_limit = a.jaw_open if a.jaw_open is not None else neutrals.jaw_open_limit
+    release_cap = jaw_release_max_ticks(open_limit)
+    too_big = {k: v for k, v in release.items() if v > release_cap}
+    if too_big:
+        raise SetupError(f"--jaw-release {too_big} is over the geometric cap {release_cap} ticks "
+                         f"({JAW_RELEASE_PER_JAW_TICK:.1f} x the jaw span {wg.JAW_CLOSED_TICK} -> "
+                         f"{open_limit})")
     neutrals = with_jaw_release(shifted_neutrals(neutrals, offsets), release)
     device = face_preview_controller() if a.preview else headctl.Device(a.port)
     run = records_layout.run_dir(records, kind, label)
@@ -1689,6 +1727,7 @@ def open_session(a: argparse.Namespace, kind: str, label: str, say=print,
             signal.signal(number, lambda signum, _f: session.request_stop(signal.Signals(signum).name))
     session.log["neutral_offset_ticks"] = offsets
     session.log["jaw_release_ticks"] = release
+    session.log["jaw_release_cap_ticks"] = release_cap
     session.log["line_ranges"] = ranges
     session.log["upper_ranges"] = upper_ranges
     session.log["upper_lips"] = upper_lips

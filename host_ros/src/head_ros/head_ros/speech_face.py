@@ -6,8 +6,9 @@
     track = SpeechTrack.make(speech, start_s=4.0)
     track.mouth(t)   # -> MouthShape(jaw, spread, round, seal)
 
-Option 1 of the lip-sync plan (2026-11-10): eSpeak NG gives the audio and
-the time of every phoneme; each phoneme maps to a viseme (a mouth shape:
+Option 1 of the lip-sync plan (2026-11-10): a speech engine gives the audio
+and the time of every phoneme (speak(): Piper by default, ElevenLabs, or
+eSpeak NG); each phoneme maps to a viseme (a mouth shape:
 jaw opening, lip-corner spread, rounding, lip seal), and the shapes blend in
 time with anticipation (the mouth moves before the sound). Option 3
 (procedural detail) on top: the jaw follows the loudness of the audio as
@@ -153,8 +154,10 @@ class Speech:
     rate: int
     samples: List[int]
     phones: List[Phone]
-    clause_ends_s: List[float] = field(default_factory=list)
-    words_s: List[float] = field(default_factory=list)
+    clause_ends_s: List[float] = field(default_factory=list)     # audio timeline
+    words_s: List[float] = field(default_factory=list)           # audio timeline
+    tts: str = "espeak"
+    voice: str = ""
 
     @property
     def duration_s(self) -> float:
@@ -216,10 +219,15 @@ def _library():
     return _LIB, _RATE_HZ
 
 
-def synthesize(text: str, voice: str = "en-us", wpm: int = 150, pitch: int = 50,
-               pitch_range: int = 50) -> Speech:
-    """Speak text with eSpeak NG into memory: samples, sample rate and the
-    timed phonemes. ValueError for bad settings, RuntimeError if eSpeak fails."""
+@dataclass
+class _EspeakRun:
+    speech: Speech
+    # (start on the audio timeline, first character index (0-based), character
+    # count) for each eSpeak WORD event; numbers can give overlapping words.
+    words: List[Tuple[float, int, int]]
+
+
+def _espeak_run(text: str, voice: str, wpm: int, pitch: int, pitch_range: int) -> _EspeakRun:
     if not text.strip():
         raise ValueError("no text")
     if not WPM_RANGE[0] <= wpm <= WPM_RANGE[1]:
@@ -233,7 +241,7 @@ def synthesize(text: str, voice: str = "en-us", wpm: int = 150, pitch: int = 50,
     lib.espeak_SetParameter(_PITCH, int(pitch), 0)
     lib.espeak_SetParameter(_RANGE, int(pitch_range), 0)
     samples: List[int] = []
-    raw: List[Tuple[int, int, str]] = []          # (type, ms, name)
+    raw: List[Tuple[int, int, str, int, int]] = []   # (type, ms, name, text position, length)
 
     def callback(wav, count, events):
         if wav and count > 0:
@@ -244,7 +252,7 @@ def synthesize(text: str, voice: str = "en-us", wpm: int = 150, pitch: int = 50,
             name = ""
             if event.type == _EVENT_PHONEME:
                 name = bytes(event.id.string).split(b"\0")[0].decode("utf-8", "replace")
-            raw.append((event.type, event.audio_position, name))
+            raw.append((event.type, event.audio_position, name, event.text_position, event.length))
             i += 1
         return 0
 
@@ -256,16 +264,348 @@ def synthesize(text: str, voice: str = "en-us", wpm: int = 150, pitch: int = 50,
     if result != 0:
         raise RuntimeError(f"espeak_Synth returned {result}")
     duration = len(samples) / float(rate)
-    events = [(t, ms / 1000.0, name) for t, ms, name in raw]
-    starts = [(max(0.0, s - EVENT_LAG_S), name) for t, s, name in events if t == _EVENT_PHONEME]
+    # All event times move EVENT_LAG_S earlier, onto the audio timeline.
+    events = [(t, max(0.0, ms / 1000.0 - EVENT_LAG_S), name, position, length)
+              for t, ms, name, position, length in raw]
+    starts = [(s, name) for t, s, name, _p, _l in events if t == _EVENT_PHONEME]
     phones = []
     for n, (start, name) in enumerate(starts):
         end = starts[n + 1][0] if n + 1 < len(starts) else duration
         if end > start:
             phones.append(Phone(start, end, name))
-    return Speech(text=text, rate=rate, samples=samples, phones=phones,
-                  clause_ends_s=[s for t, s, _ in events if t == _EVENT_END],
-                  words_s=[s for t, s, _ in events if t == _EVENT_WORD])
+    # text_position counts characters from 1 (checked 2026-11-11: "Hé said"
+    # gives 'said' at 4, so characters, not UTF-8 bytes).
+    words = [(s, position - 1, length) for t, s, _n, position, length in events
+             if t == _EVENT_WORD and length > 0]
+    speech = Speech(text=text, rate=rate, samples=samples, phones=phones,
+                    clause_ends_s=[s for t, s, *_ in events if t == _EVENT_END],
+                    words_s=[s for s, _p, _l in words], tts="espeak", voice=voice)
+    return _EspeakRun(speech, words)
+
+
+def synthesize(text: str, voice: str = "en-us", wpm: int = 150, pitch: int = 50,
+               pitch_range: int = 50) -> Speech:
+    """Speak text with eSpeak NG into memory: samples, sample rate and the
+    timed phonemes. ValueError for bad settings, RuntimeError if eSpeak fails."""
+    return _espeak_run(text, voice, wpm, pitch, pitch_range).speech
+
+
+# Piper (neural, local) ----------------------------------------------------------
+# piper-tts 1.8.0 (bench/requirements.txt). A voice loaded with
+# include_alignments=True gives, per sentence chunk, phoneme_alignments: one
+# (phoneme, num_samples) per Piper phoneme, summing to the chunk's audio
+# length (checked 2026-11-11, en_US-ljspeech-high, 256-sample steps). Piper's
+# phonemes are single code points from eSpeak NG: stress marks and the length
+# mark carry time of their own, diphthongs come as two phonemes, a space
+# separates words, punctuation is a pause, ^ and $ start and end the chunk.
+# The times come from the same durations that make the audio, so there is no
+# event lag to correct.
+
+PIPER_VOICE_DIR = Path(__file__).resolve().parents[5] / "bench" / "piper_voices"
+PIPER_PRESETS: Dict[str, str] = {
+    "female": "en_US-ljspeech-high",              # model card: "US English female voice"
+    "male": "en_US-norman-medium",                # model card: "US English male voice"
+}
+PIPER_STRESS = "ˈˌ"
+PIPER_LENGTH = "ː"
+PIPER_BOUNDS = "^$"
+SPEED_RANGE = (0.5, 2.0)
+
+
+def piper_model_path(voice: str) -> Path:
+    """A preset (female/male), a voice name in PIPER_VOICE_DIR, or a path to
+    an .onnx model (its .onnx.json next to it). ValueError if missing."""
+    name = PIPER_PRESETS.get(voice, voice)
+    path = Path(name).expanduser()
+    if path.suffix != ".onnx":
+        path = PIPER_VOICE_DIR / f"{name}.onnx"
+    if not path.is_file() or not Path(f"{path}.json").is_file():
+        raise ValueError(f"no Piper voice {voice!r}: need {path} and {path}.json "
+                         f"(python3 -m piper.download_voices --data-dir {PIPER_VOICE_DIR} {name})")
+    return path
+
+
+def _is_pause(phoneme: str) -> bool:
+    import unicodedata
+
+    return phoneme in PIPER_BOUNDS or all(unicodedata.category(c)[0] in "PS" for c in phoneme)
+
+
+def phones_from_alignments(chunks: Sequence[Tuple[int, Sequence[Tuple[str, int]]]], rate: int
+                           ) -> Tuple[List[Phone], List[float], List[float]]:
+    """(phones, clause ends, word starts) from Piper chunks of (audio sample
+    count, [(phoneme, sample count)]). Stress marks go to the next phone,
+    length marks and spaces to the one before; punctuation and chunk bounds
+    become pauses ('' phones, adjacent ones merged); a punctuation mark is a
+    clause end."""
+    phones: List[Phone] = []
+    clause_ends: List[float] = []
+    words: List[float] = []
+    offset = 0
+    for chunk_samples, items in chunks:
+        at = offset
+        carry: Optional[int] = None               # start of stress marks waiting for a phone
+        new_word = True
+        for phoneme, count in items:
+            start, at = at, at + int(count)
+            if phoneme and all(c in PIPER_STRESS for c in phoneme):
+                carry = start if carry is None else carry
+                continue
+            last = phones[-1] if phones else None
+            if phoneme == PIPER_LENGTH or phoneme.isspace():
+                if phoneme.isspace():
+                    new_word = True
+                if last is not None and last.ipa:
+                    last.end_s = at / rate
+                    if phoneme == PIPER_LENGTH:
+                        last.ipa += PIPER_LENGTH
+                    continue
+                phoneme = ""                      # nothing to join: a pause
+            begin = carry if carry is not None else start
+            carry = None
+            if not phoneme or _is_pause(phoneme):
+                if phoneme and phoneme not in PIPER_BOUNDS:
+                    clause_ends.append(begin / rate)
+                new_word = True
+                if last is not None and not last.ipa:
+                    last.end_s = at / rate
+                else:
+                    phones.append(Phone(begin / rate, at / rate, ""))
+                continue
+            if new_word:
+                words.append(begin / rate)
+                new_word = False
+            phones.append(Phone(begin / rate, at / rate, phoneme))
+        offset += chunk_samples
+    return [p for p in phones if p.end_s > p.start_s], clause_ends, words
+
+
+_PIPER_VOICES: Dict[Path, object] = {}
+
+
+def synthesize_piper(text: str, voice: str = "female", speed: float = 1.0) -> Speech:
+    """Speak text with a Piper voice (see piper_model_path). speed 1 = the
+    voice's own pace. ValueError for bad settings, RuntimeError if the model
+    gives no alignments."""
+    if not text.strip():
+        raise ValueError("no text")
+    if not SPEED_RANGE[0] <= speed <= SPEED_RANGE[1]:
+        raise ValueError(f"speed must be {SPEED_RANGE[0]}-{SPEED_RANGE[1]}")
+    path = piper_model_path(voice)
+    try:
+        from piper import PiperVoice, SynthesisConfig
+    except ImportError as error:
+        raise RuntimeError("piper-tts is not installed (bench/requirements.txt)") from error
+    model = _PIPER_VOICES.get(path)
+    if model is None:
+        model = _PIPER_VOICES[path] = PiperVoice.load(path, include_alignments=True)
+    config = SynthesisConfig(length_scale=model.config.length_scale / speed)
+    import array
+
+    samples = array.array("h")
+    chunks = []
+    rate = 0
+    for chunk in model.synthesize(text, syn_config=config, include_alignments=True):
+        if chunk.sample_width != 2 or chunk.sample_channels != 1:
+            raise RuntimeError("Piper gave audio that is not 16-bit mono")
+        if rate and chunk.sample_rate != rate:
+            raise RuntimeError("Piper changed sample rate between sentences")
+        rate = chunk.sample_rate
+        if not chunk.phoneme_alignments:
+            raise RuntimeError(f"Piper voice {path.name} gives no phoneme alignments "
+                               "(needs the onnx package: piper-tts[alignment])")
+        count = len(chunk.audio_int16_bytes) // 2
+        aligned = sum(int(a.num_samples) for a in chunk.phoneme_alignments)
+        if aligned != count:
+            raise RuntimeError(f"Piper alignment covers {aligned} samples of {count}")
+        samples.frombytes(chunk.audio_int16_bytes)
+        chunks.append((count, [(a.phoneme, int(a.num_samples)) for a in chunk.phoneme_alignments]))
+    if not chunks:
+        raise ValueError("Piper made no audio for this text")
+    phones, clause_ends, words = phones_from_alignments(chunks, rate)
+    return Speech(text=text, rate=rate, samples=samples.tolist(), phones=phones,
+                  clause_ends_s=clause_ends, words_s=words, tts="piper", voice=path.stem)
+
+
+# ElevenLabs (neural, cloud) ----------------------------------------------------
+# POST /v1/text-to-speech/{voice_id}/with-timestamps, key in the xi-api-key
+# header (ElevenLabs API docs, read 2026-11-11). The answer has audio_base64
+# and alignment: characters with character_start_times_seconds and
+# character_end_times_seconds, for the text as sent. Times are per character,
+# not per phoneme, so eSpeak NG gives the phonemes and their relative times
+# inside each word, and each word is stretched onto the time ElevenLabs spoke
+# its characters. The docs do not say that audio_base64 is a WAV file for
+# output_format wav_22050, so the code checks for the RIFF header.
+
+ELEVENLABS_URL = "https://api.elevenlabs.io"
+ELEVENLABS_MODEL = "eleven_multilingual_v2"       # the API's documented default model_id
+ELEVENLABS_FORMAT = "wav_22050"
+ELEVENLABS_KEY_ENV = "ELEVENLABS_API_KEY"
+# voice_id for --voice female/male; empty until chosen (--list-voices).
+ELEVENLABS_PRESETS: Dict[str, str] = {}
+
+
+def _elevenlabs_request(path: str, body: Optional[dict] = None, timeout_s: float = 60.0) -> dict:
+    import json as _json
+    import os
+    import urllib.error
+    import urllib.request
+
+    key = os.environ.get(ELEVENLABS_KEY_ENV, "").strip()
+    if not key:
+        raise RuntimeError(f"set {ELEVENLABS_KEY_ENV} to an ElevenLabs API key")
+    data = None if body is None else _json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(ELEVENLABS_URL + path, data=data,
+                                     method="GET" if body is None else "POST",
+                                     headers={"xi-api-key": key, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_s) as response:
+            return _json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", "replace")[:300]
+        raise RuntimeError(f"ElevenLabs HTTP {error.code}: {detail}") from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"ElevenLabs not reachable: {error.reason}") from error
+
+
+def elevenlabs_voices() -> List[Dict[str, str]]:
+    """The account's default (premade) voices: voice_id, name, gender, accent."""
+    out = []
+    token = None
+    while True:
+        query = "/v2/voices?voice_type=default&page_size=100"
+        if token:
+            import urllib.parse
+
+            query += "&next_page_token=" + urllib.parse.quote(token)
+        answer = _elevenlabs_request(query)
+        for v in answer.get("voices", []):
+            labels = v.get("labels") or {}
+            out.append({"voice_id": v.get("voice_id", ""), "name": v.get("name", ""),
+                        "gender": labels.get("gender", ""), "accent": labels.get("accent", "")})
+        token = answer.get("next_page_token")
+        if not answer.get("has_more") or not token:
+            return out
+
+
+def _warp(t: float, anchors: Sequence[Tuple[float, float]]) -> float:
+    """Piecewise-linear map through (from, to) anchors (both increasing)."""
+    if t <= anchors[0][0]:
+        return anchors[0][1]
+    for (a0, b0), (a1, b1) in zip(anchors, anchors[1:]):
+        if t <= a1:
+            return b0 + (b1 - b0) * (t - a0) / (a1 - a0)
+    return anchors[-1][1]
+
+
+def phones_onto_characters(run: _EspeakRun, characters: Sequence[str], starts_s: Sequence[float],
+                           ends_s: Sequence[float], duration_s: float
+                           ) -> Tuple[List[Phone], List[float], List[float]]:
+    """(phones, clause ends, word starts): eSpeak's timing stretched, word by
+    word, onto per-character times of another voice speaking run's text."""
+    import difflib
+
+    text = run.speech.text
+    spoken = "".join(characters)
+    index: Dict[int, int] = {}                    # text character -> alignment character
+    for block in difflib.SequenceMatcher(None, text, spoken, autojunk=False).get_matching_blocks():
+        for k in range(block.size):
+            index[block.a + k] = block.b + k
+    espeak = run.speech
+    anchors: List[Tuple[float, float]] = [(0.0, 0.0)]
+    for n, (word_at, first, length) in enumerate(run.words):
+        chars = [index[i] for i in range(first, first + length)
+                 if i in index and not text[i].isspace()]
+        if not chars:
+            continue
+        next_at = run.words[n + 1][0] if n + 1 < len(run.words) else espeak.duration_s
+        sounding = [p for p in espeak.phones
+                    if p.ipa.strip(_STRIP) and word_at - 1e-6 <= p.start_s < next_at - 1e-6]
+        word_end = sounding[-1].end_s if sounding else next_at
+        pairs = [(word_at, starts_s[min(chars)])]
+        if word_end < next_at - 1e-3:             # a word end on the next start: keep the start
+            pairs.append((word_end, ends_s[max(chars)]))
+        for a, b in pairs:
+            if a > anchors[-1][0] + 1e-6 and b > anchors[-1][1] + 1e-6:
+                anchors.append((a, b))
+    end = (espeak.duration_s, duration_s)
+    if end[0] > anchors[-1][0] and end[1] > anchors[-1][1]:
+        anchors.append(end)
+    if len(anchors) < 3:
+        raise RuntimeError("the ElevenLabs timing does not match the text")
+    phones = []
+    for p in espeak.phones:
+        a, b = _warp(p.start_s, anchors), _warp(p.end_s, anchors)
+        if b > a:
+            phones.append(Phone(a, b, p.ipa))
+    return (phones, [_warp(t, anchors) for t in espeak.clause_ends_s],
+            [_warp(t, anchors) for t in espeak.words_s])
+
+
+def synthesize_elevenlabs(text: str, voice: str, speed: float = 1.0, model_id: str = ELEVENLABS_MODEL,
+                          request=None) -> Speech:
+    """Speak text with an ElevenLabs voice (preset or voice_id). The text goes
+    to ElevenLabs. request(path, body) -> answer dict stands in for the HTTP
+    call in tests. ValueError for bad settings, RuntimeError for API errors."""
+    import base64
+    import io
+    import urllib.parse
+
+    if not text.strip():
+        raise ValueError("no text")
+    if not SPEED_RANGE[0] <= speed <= SPEED_RANGE[1]:
+        raise ValueError(f"speed must be {SPEED_RANGE[0]}-{SPEED_RANGE[1]}")
+    voice_id = ELEVENLABS_PRESETS.get(voice, voice)
+    if voice in ("female", "male") and voice not in ELEVENLABS_PRESETS:
+        raise ValueError(f"no ElevenLabs {voice} voice chosen yet: run --list-voices, then --voice VOICE_ID")
+    body: Dict[str, object] = {"text": text, "model_id": model_id}
+    if speed != 1.0:
+        body["voice_settings"] = {"speed": speed}
+    path = (f"/v1/text-to-speech/{urllib.parse.quote(voice_id)}/with-timestamps"
+            f"?output_format={ELEVENLABS_FORMAT}")
+    answer = (request or _elevenlabs_request)(path, body)
+    audio = base64.b64decode(answer.get("audio_base64") or "")
+    if audio[:4] != b"RIFF":
+        raise RuntimeError(f"ElevenLabs audio is not a WAV file ({ELEVENLABS_FORMAT}); "
+                           f"first bytes {audio[:4]!r}")
+    with wave.open(io.BytesIO(audio)) as stream:
+        if stream.getsampwidth() != 2 or stream.getnchannels() != 1:
+            raise RuntimeError("ElevenLabs WAV is not 16-bit mono")
+        rate = stream.getframerate()
+        import array
+
+        samples = array.array("h")
+        samples.frombytes(stream.readframes(stream.getnframes()))
+    alignment = answer.get("alignment") or {}
+    characters = alignment.get("characters") or []
+    starts = alignment.get("character_start_times_seconds") or []
+    ends = alignment.get("character_end_times_seconds") or []
+    if not characters or not len(characters) == len(starts) == len(ends):
+        raise RuntimeError("ElevenLabs gave no character timing")
+    run = _espeak_run(text, "en-us", 150, 50, 50)
+    phones, clause_ends, words = phones_onto_characters(run, characters, starts, ends,
+                                                        len(samples) / float(rate))
+    return Speech(text=text, rate=rate, samples=samples.tolist(), phones=phones,
+                  clause_ends_s=clause_ends, words_s=words, tts="elevenlabs", voice=voice_id)
+
+
+# One entry point ---------------------------------------------------------------
+TTS_ENGINES = ("piper", "elevenlabs", "espeak")
+DEFAULT_VOICE = {"piper": "female", "elevenlabs": "female", "espeak": "en-us"}
+
+
+def speak(text: str, tts: str = "piper", voice: Optional[str] = None, speed: float = 1.0,
+          wpm: int = 150, pitch: int = 50) -> Speech:
+    """Speech from any engine. speed is for piper/elevenlabs, wpm and pitch
+    for espeak."""
+    voice = voice or DEFAULT_VOICE.get(tts, "")
+    if tts == "piper":
+        return synthesize_piper(text, voice, speed)
+    if tts == "elevenlabs":
+        return synthesize_elevenlabs(text, voice, speed)
+    if tts == "espeak":
+        return synthesize(text, voice, wpm, pitch)
+    raise ValueError(f"no speech engine {tts!r} ({', '.join(TTS_ENGINES)})")
 
 
 def _ease(u: float) -> float:
@@ -302,7 +642,7 @@ class SpeechTrack:
         phrases: List[Tuple[float, float]] = []
         begin: Optional[float] = None
         last_end = 0.0
-        ends = sorted(max(0.0, e - EVENT_LAG_S) for e in speech.clause_ends_s)
+        ends = sorted(speech.clause_ends_s)
         for phone in speech.phones:
             silent = viseme_names(phone.ipa) == ("rest",)
             if not silent:
@@ -392,7 +732,8 @@ class SpeechTrack:
 def summary(speech: Speech) -> Dict[str, object]:
     names = [p.ipa for p in speech.phones]
     unknown = sorted({n for n in names if n.strip(_STRIP) and n.strip(_STRIP) not in PHONE_VISEMES})
-    return {"text": speech.text, "rate_hz": speech.rate, "duration_s": round(speech.duration_s, 3),
+    return {"text": speech.text, "tts": speech.tts, "voice_used": speech.voice,
+            "rate_hz": speech.rate, "duration_s": round(speech.duration_s, 3),
             "phones": len(names), "unknown_ipa": unknown}
 
 

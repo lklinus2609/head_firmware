@@ -79,6 +79,66 @@ the talking runs (201049-203145, up to 118 ticks):
   |---|---|---|---|---|
   | 122625 (A) | as they were (slack, knee test start) | 103 ticks (3914) | 102 (3910) | 107 (3901) |
   | 122720 (B) | 11, 14, 9, 15, 19 paid out 300 ticks | 107 (3895) | 110 (3888) | 119 (3877) |
+  | 163937 (C) | down lines 8 and 9 slackened a lot by the operator (8 at 1997, 9 at 3467); no line took load (8: 0 mA, 9: <= 18 mA, others <= 6 mA) | 104 (3879) | 117 (3864) | 115 (3863) |
+  Face-session test 2026-11-11 (knee 172157, `head-face --frame` jaw = 1 for
+  0.9 s, three times, goal 3700, 650 mA cap, peak guard 1.0 s): release
+  8=30 / 9=15 (run 172513): 131-146 ticks open (4022 -> 3876) at 613-650 mA;
+  release at the new geometric cap 8=3333 / 9=3333 (run 172616): up to 164
+  ticks (4020 -> 3856) at 545-600 mA, the lines paying out 800+ ticks during
+  each hold (all lines <= 39 mA). The video shows a clearly wider lip gap with
+  the large release. So a large down-line release gives about 20 ticks more
+  and needs about 70 mA less jaw current; the absolute stop stays near
+  3856-3877 in every test today.
+
+  Release sweep, same day (knee 173247, same frames, `--jaw-release 8=R
+  9=R`, head-face line speed 300 ticks/s; payout = line position minus its
+  knee at the widest jaw; runs 173550-174002):
+
+  | R (at j = 1) | payout 8 / 9 at the widest | opening | widest tick | jaw mA |
+  |---|---|---|---|---|
+  | 0 | 29-178 / 116-244 (follower drift) | 105-115 | 3888-3898 | 552-650 |
+  | 300 | 216-300 / 272-297 | 117-123 | 3876-3882 | 514-628 |
+  | 500 | 310-345 / 301-329 | 121-123 | 3875-3877 | 526-616 |
+  | 700 | 351-365 / 334-339 | 124-128 | 3871-3875 | 483-531 |
+  | 900 | 396-408 / 393-407 | 131-134 | 3867-3870 | 472-498 |
+  | 1200 | 536-562 / 539-567 | 134-141 | 3859-3866 | 481-560 |
+  | 1600 | 605-768 / 600-772 | 140-143 | 3856-3859 | 448-549 |
+  | 2200 | 604-629 / 601-626 | 141-144 | 3856-3859 | 438-545 |
+
+  The opening stops growing at a payout of about 600 ticks per down line
+  (about 7.4 mm of line on the 8.1 mm horn), about 4.3 horn ticks per real jaw
+  tick (39 % of the 11.1 geometric bound). That is about 30 ticks (+28 %) more
+  opening than with no release, at about 100 mA less jaw current. The line
+  currents read only 20-30 mA in every run; the jaw current is the sensor
+  that shows the down lines holding the jaw.
+
+  Mouth opening in millimetres (2026-11-11, `scripts/head-mouthdepth`,
+  run 175813, knee 175339, release 8=1250 / 9=1250, jaw j = 1 for 0.9 s three
+  times; RealSense depth aligned to color, face about 305 mm from the
+  camera): lip gap at the mouth centre 5.9-6.2 mm open, no gap closed;
+  lower lip moves 7.6-9.2 mm (6.8-8.1 mm down), chin 7.1-8.6 mm, upper lip
+  1.5-2.2 mm, nose tip (should not move) 0.7-2.1 mm (noise and head sway).
+  So the lower lip and chin drop about 7-8 mm. Human reference (operator, a
+  clinical jaw-tracking study, n = 30, not read here): mean maximum vertical
+  speech opening 11.5 mm, SD 3.2 mm (about 8-15 mm). The head's mouth
+  motion is at the low end of that band; its jaw turns about 12 degrees, but
+  the chin moves only about 40 % of what a rigid jaw point 90 mm from the
+  axis would (about 19 mm), so most of the jaw motion goes into the skin.
+
+  Lower lips pulled 50 ticks first (operator; servos 3/4, lip action 0.125
+  of their 400-tick session span; run 180418, else as 175813): no change
+  the camera can see. Closed, the lower lip sat 0.7-1.0 mm from where it was
+  without the pull (nose reference 1.1-3.0 mm = noise); open, the lower lip
+  dropped 7.7-7.9 mm and the lip gap was 5.3-6.3 mm (5.9-6.2 mm without).
+  Lower-lip ladder (runs 180604-180721, same settings, lip 0.25 / 0.5 /
+  0.75 / 1.0 = 100-400 ticks, all inside the marks, <= 68 mA): servos 3/4
+  pull the lower lip DOWN. At rest it sits 1.0 / 2.3 / 3.7 / 5.3 mm lower,
+  the lips part 1-3 mm at 0.75-1.0 even with the jaw closed, and with the jaw
+  open the lip gap is 6.3-7.1 / 7.7-8.0 / 8.2-8.7 / 10.1-11.7 mm (about 6 mm
+  without). Lower lip 1.0 plus the open jaw reaches the human speech mean
+  (11.5 mm, operator's source). head-natural --lips now moves the lower lip
+  with the jaw (and lets it rest on p/b/m); it used to pull it on p/b/m,
+  which opened the mouth there.
 
   (opened ticks from the jaw's closed start; widest absolute tick in brackets;
   late mean current 443/482/555 mA in A, 419/479/558 mA in B; 90 % of the
@@ -176,7 +236,7 @@ map should therefore use the jaw's measured position, as rule 4 says.
 How to find the workspace again on a new session or head:
 
 ```sh
-scripts/head-knee --limit 650 --camera realsense --down-clearance 800 --down-max-travel 2000
+scripts/head-knee --limit 650 --camera realsense --down-clearance 800 --down-max-travel 2000 --jaw-tick 4000
 scripts/head-jawcorner run --neutrals <knee>/neutrals.json --range up=350 --range diag=290 --range down=150 --line-speed 1000 --jaw-speed 600 --jaw-open 3880 --camera realsense
 scripts/head-jawcorner report <run folder>
 ```
@@ -210,6 +270,36 @@ Limits that a model cannot learn around (hardware changes):
   and faster reopening read 275 mA (280 mA abort). Human-speed blinks need
   about 2-3 times less lid travel per close (linkage ratio) or a faster servo;
   no software setting gets there.
+  Full-revolution blink, 2026-11-11 (operator: the lid linkage is a crank;
+  `scripts/head-lidrev`, run 181754, lids 5/6 together, 80000 ticks/s^2,
+  one turn in the closing direction and one back at each speed; operator
+  allowed past the closed marks, full turns and up to 7000 ticks/s for this
+  test). Both lids turned fully at 1000-6000 ticks/s. At 7000 lid 6 read
+  349 mA while reopening and the 280 mA abort turned torque off. Left eye
+  covered/uncovered from the video (15 fps, +-0.07 s; the right eye's red
+  target is not measurable with the colour mask used):
+
+  | ticks/s | back-and-forth: close / reopen | full turn: eye covered from - to |
+  |---|---|---|
+  | 3500 | 0.37-0.48 s / 0.43 s | 0.35 - 1.08 s |
+  | 5000 | 0.30-0.36 s / 0.35 s | 0.32 - 0.85 s |
+  | 6000 | 0.30-0.32 s / 0.33 s | 0.33 - 0.74 s |
+  | 7000 | 0.29-0.30 s / (aborted) | - |
+
+  The full turn closes the eye exactly as fast (same path) but keeps it
+  covered for most of the turn and opens it only near the end, so a full-turn
+  blink takes longer than closing and reopening (0.74-0.85 s against about
+  0.65-0.71 s at 5000-6000). Above 5000 ticks/s closing gains almost nothing
+  (0.30 -> 0.29 s); the lids lag their goal by 220-280 ticks there, so the
+  servo, not the software limit, sets the speed. Human-speed blinks still need
+  less lid travel per blink (a different lid linkage) or a faster servo.
+  With the lid current cap raised to 600 mA for one session (operator: full
+  speed while under 600 mA; `head-lidrev --current 600 --accel 200000
+  --no-rev`, run 182353_face_lidrev), back-and-forth closing took lid 5 0.24 s
+  and lid 6 0.32 s at 5000 ticks/s (0.26 / 0.36 s at 300 mA) and lid 5
+  0.20 s at 7000; at 7000 lid 6 read -570 mA (braking at the closed end) and
+  the 570 mA abort stopped the run. The board profile was set back to 300 mA
+  for lids 5/6 afterwards (generation 135). More current buys about 10 %.
 - **Left/right asymmetry and friction.** Line 9 barely moves with the jaw;
   followers ratchet; knees move between runs.
 - **Line anchors are not robust yet.** On the new head, a corner line stopped
@@ -228,8 +318,12 @@ mouth opens about 110 ticks at most (a stiff limit, not the lines) and the
 lids close 3-7 times slower than a human's, and both need hardware changes.
 Robustness for unattended runs is limited by the line anchors (above) and the
 rare BUS fault at Enable (below). The spoken-text demo (`head-natural --say`,
-section 1) is built and tested on the simulated board; it has not run on the
-head yet (blocked by line 8 on 2026-11-11).
+section 1) ran to the end on the head on 2026-11-11 (run 142831, demo video
+18): 8 s of speech with audio, 5 blinks, 20 saccades, lines <= 91 mA, jaw
+opening 114 ticks at up to 655 mA, 41 C. The mouth motion is small because of
+the jaw limit. Three earlier takes stopped about 1.5 s into the speech on the
+magnet-drop check, until the check got its 0.3 s settle window after a
+release or jaw move (`workspace_guard.DROP_SETTLE_S`).
 - **Firmware: BUS fault at Enable.** 4 of about 30 Enables today were refused
   with a BUS fault (195943, 203019, 203033, 204803). Source (`src/main.c`
   `service_preparation_locked`, `src/dxl.c` `head_dxl_prepare_step`): one

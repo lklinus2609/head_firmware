@@ -226,10 +226,26 @@ class NaturalPlan:
 SPEECH_SPREAD_UP = 0.25
 SPEECH_SPREAD_DIAG = 0.3
 SPEECH_ROUND_RELAX = 0.7
-# --lips: the lower lips (3/4, "lip") and upper lips (13/18, "upper_lip")
-# press for p/b/m by this fraction of their marked range (chosen; their
-# effect on this head is not measured yet).
-SPEECH_SEAL_LIP = 0.5
+# --lips: the lower lips (3/4, "lip") pull the lower lip DOWN (measured
+# 2026-11-11, runs 180418-180721: at rest the lower lip sits 1.0 / 2.3 / 3.7 /
+# 5.3 mm lower at lip 0.25 / 0.5 / 0.75 / 1.0; with the jaw open the lip gap
+# grows from about 6 mm to 10-12 mm at lip 1.0). So the lower lip follows the
+# jaw: lip = SPEECH_LIP_WITH_JAW x jaw x articulation (capped at 1), and it is
+# 0 on a p/b/m seal (the seal lets it go back up). The upper lips (13/18) are
+# not driven: their direction is not measured. (Until 2026-11-11 --lips
+# pulled 3/4 on p/b/m, which opened the mouth there.)
+SPEECH_LIP_WITH_JAW = 1.0
+SPEECH_SEAL_LIP = 0.5            # kept for older notes; no longer used
+# --articulation G (2026-11-11, operator: "move its mouth more"): G = 1 is the
+# take that worked on the head (run 142831). G > 1 scales the corner spread,
+# the rounding and the lip seal by G (each capped at 1), opens the jaw more on
+# the vowels that do not open it fully (jaw x (1 + (G - 1) / 2), capped at 1;
+# the jaw budget still limits long openings), and drops the corners with
+# the jaw: v -= SPEECH_JAW_CORNER_DROP x (G - 1) x jaw (people's mouth
+# corners go down a little when the jaw opens wide; v < 0 drives the down
+# lines). The numbers are chosen, not measured.
+SPEECH_JAW_CORNER_DROP = 0.35
+ARTICULATION_RANGE = (0.5, 3.0)
 # Gaze while speaking (chosen, from how people look in conversation): at a
 # phrase start the eyes look away with this chance, then come back to the
 # listener (the camera, gaze 0,0) for the rest of the phrase.
@@ -250,11 +266,13 @@ class SpeechPlan(NaturalPlan):
     blinks follow the phrases."""
     track: Optional[object] = None
     lips: bool = False
+    articulation: float = 1.0
 
     @classmethod
-    def make_speech(cls, settings: NaturalSettings, track, lips: bool = False) -> "SpeechPlan":
+    def make_speech(cls, settings: NaturalSettings, track, lips: bool = False,
+                    articulation: float = 1.0) -> "SpeechPlan":
         base = NaturalPlan.make(NaturalSettings(**{**vars(settings), "talk": False}))
-        plan = cls(settings, track=track, lips=lips)
+        plan = cls(settings, track=track, lips=lips, articulation=articulation)
         rng = random.Random(settings.seed + 1000)
         # Gaze: the base plan's saccades outside speech; while speaking,
         # avert-and-return at each phrase start, small moves inside a phrase.
@@ -283,26 +301,37 @@ class SpeechPlan(NaturalPlan):
         plan.blinks = sorted(b for b in blinks if b < settings.seconds - 1.0)
         return plan
 
+    def _mouth(self, t: float):
+        """The track's mouth shape with the articulation gain applied."""
+        m = self.track.mouth(t)
+        g = self.articulation
+        if g == 1.0:
+            return m
+        jaw = m.jaw if m.jaw >= 1.0 else min(1.0, m.jaw * (1.0 + (g - 1.0) / 2.0))
+        return type(m)(jaw=jaw, spread=min(1.0, m.spread * g), round=min(1.0, m.round * g),
+                       seal=m.seal)
+
     def jaw(self, t: float) -> float:
-        return self.track.mouth(t).jaw
+        return self._mouth(t).jaw
 
     def face(self, t: float):
         if t > self.settings.seconds:
             return None
         s = self.settings
         k = self.smile(t)
-        m = self.track.mouth(t)
-        keep = 1.0 - SPEECH_ROUND_RELAX * m.round
+        m = self._mouth(t)
+        keep = max(0.0, 1.0 - SPEECH_ROUND_RELAX * m.round)
+        drop = SPEECH_JAW_CORNER_DROP * max(0.0, self.articulation - 1.0) * m.jaw
         if s.smile_up < 0.0:
-            side = (0.0, k * s.smile_up * keep)
+            side = (0.0, max(-1.0, k * s.smile_up * keep - drop))
         else:
-            side = (min(1.0, k * s.smile_diag * keep + SPEECH_SPREAD_DIAG * m.spread),
-                    min(1.0, k * s.smile_up * keep + SPEECH_SPREAD_UP * m.spread))
+            up = k * s.smile_up * keep + SPEECH_SPREAD_UP * m.spread - drop
+            diag = k * s.smile_diag * keep + SPEECH_SPREAD_DIAG * m.spread
+            side = (min(1.0, max(0.0, diag)), max(-1.0, min(1.0, up)))
         actions: Dict[str, object] = {"right": side, "left": side}
         if self.lips:
-            seal = SPEECH_SEAL_LIP * m.seal
-            actions["lip"] = (seal, seal)
-            actions["upper_lip"] = (seal, seal)
+            lip = min(1.0, SPEECH_LIP_WITH_JAW * self.articulation * m.jaw * (1.0 - m.seal))
+            actions["lip"] = (lip, lip)
         return actions, m.jaw
 
     def marks(self) -> List[Tuple[float, str]]:
@@ -650,6 +679,32 @@ SPEECH_FILE = "speech.wav"
 SPEECH_TAIL_S = 2.5              # after the speech: smile ramp-out and rest
 
 
+def list_voices(tts: str) -> int:
+    """Print the voices --voice takes for this engine."""
+    if tts == "piper":
+        for preset, name in speech_face.PIPER_PRESETS.items():
+            print(f"{preset:8s} -> {name}")
+        models = sorted(speech_face.PIPER_VOICE_DIR.glob("*.onnx"))
+        print(f"installed in {speech_face.PIPER_VOICE_DIR}:")
+        for path in models:
+            print(f"  {path.stem}")
+        if not models:
+            print("  (none)")
+        return 0
+    if tts == "elevenlabs":
+        for preset, voice_id in speech_face.ELEVENLABS_PRESETS.items():
+            print(f"{preset:8s} -> {voice_id}")
+        try:
+            voices = speech_face.elevenlabs_voices()
+        except RuntimeError as error:
+            print(f"ElevenLabs: {error}"); return 2
+        for v in voices:
+            print(f"{v['voice_id']}  {v['name']:20s} {v['gender']:8s} {v['accent']}")
+        return 0
+    print("eSpeak NG voices: run  espeak-ng --voices=en")
+    return 0
+
+
 def main(argv: Optional[List[str]] = None, audio_player_factory=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -688,12 +743,24 @@ def main(argv: Optional[List[str]] = None, audio_player_factory=None) -> int:
                         help="only step the lids to 0.3, 0.4 ... 1.0 of the closed mark and hold "
                              "(stills): to see where the eye is covered")
     parser.add_argument("--say", metavar="TEXT",
-                        help="speak this text (eSpeak NG): the jaw and lip corners follow its "
+                        help="speak this text (--tts engine): the jaw and lip corners follow its "
                              "visemes, gaze and blinks its phrases; the audio plays (aplay) and, "
                              "with a camera, is added to the video (video_with_audio.webm)")
-    parser.add_argument("--voice", default="en-us", help="eSpeak NG voice (default en-us)")
-    parser.add_argument("--wpm", type=int, default=150, help="speech rate, words per minute")
-    parser.add_argument("--pitch", type=int, default=50, help="eSpeak pitch 0-100")
+    parser.add_argument("--tts", choices=speech_face.TTS_ENGINES, default="piper",
+                        help="speech engine: piper (local neural voice, default), elevenlabs "
+                             f"(cloud, sends the text to ElevenLabs, needs {speech_face.ELEVENLABS_KEY_ENV}) "
+                             "or espeak (eSpeak NG, the old robotic voice)")
+    parser.add_argument("--voice",
+                        help="piper: female (default), male, a voice name in bench/piper_voices or "
+                             "a path to an .onnx model; elevenlabs: female, male or a voice_id; "
+                             "espeak: an eSpeak voice (default en-us)")
+    parser.add_argument("--speed", type=float, default=1.0,
+                        help=f"piper/elevenlabs speaking speed, {speech_face.SPEED_RANGE[0]}-"
+                             f"{speech_face.SPEED_RANGE[1]} (1 = the voice's own pace)")
+    parser.add_argument("--list-voices", action="store_true",
+                        help="list the voices for --tts and stop")
+    parser.add_argument("--wpm", type=int, help="espeak only: words per minute (default 150)")
+    parser.add_argument("--pitch", type=int, help="espeak only: pitch 0-100 (default 50)")
     parser.add_argument("--speech-at", type=float,
                         help="script time the speech starts (default: once the smile is up)")
     parser.add_argument("--audio-advance-ms", type=float, default=0.0,
@@ -701,18 +768,32 @@ def main(argv: Optional[List[str]] = None, audio_player_factory=None) -> int:
                              "the audio-vs-motion delay is not measured yet)")
     parser.add_argument("--no-audio", action="store_true", help="do not play the speech audio")
     parser.add_argument("--lips", action="store_true",
-                        help="also press the lower (3/4) and upper (13/18) lips for p/b/m")
+                        help="also move the lower lips (3/4, pull the lip down) with the jaw: "
+                             "open on open vowels, at rest on p/b/m")
+    parser.add_argument("--articulation", type=float, default=1.0,
+                        help=f"mouth motion gain for --say, {ARTICULATION_RANGE[0]}-"
+                             f"{ARTICULATION_RANGE[1]} (1 = run 142831): corner spread, rounding, "
+                             "lip seal, mid-vowel jaw, corners dropping with the jaw")
     parser.add_argument("--eye-accel", type=float, default=EYE_ACCEL_TPS2, help="ticks/s^2")
     parser.add_argument("--lid-accel", type=float, default=LID_ACCEL_TPS2, help="ticks/s^2")
     a = parser.parse_args(argv)
+    if a.list_voices:
+        return list_voices(a.tts)
+    if a.tts == "espeak":
+        a.wpm = 150 if a.wpm is None else a.wpm
+        a.pitch = 50 if a.pitch is None else a.pitch
+    elif a.wpm is not None or a.pitch is not None:
+        print("--wpm and --pitch are for --tts espeak; use --speed."); return 2
     speech = None
     if a.say is not None:
         if a.validate is not None or a.explore or a.lid_ladder or a.no_talk:
             print("--say does not go with --validate, --explore, --lid-ladder or --no-talk."); return 2
         if not -500.0 <= a.audio_advance_ms <= 500.0:
             print("--audio-advance-ms must be -500 to 500."); return 2
+        if not ARTICULATION_RANGE[0] <= a.articulation <= ARTICULATION_RANGE[1]:
+            print(f"--articulation must be {ARTICULATION_RANGE[0]}-{ARTICULATION_RANGE[1]}."); return 2
         try:
-            speech = speech_face.synthesize(a.say, a.voice, a.wpm, a.pitch)
+            speech = speech_face.speak(a.say, a.tts, a.voice, a.speed, a.wpm or 150, a.pitch or 50)
         except (ValueError, RuntimeError, OSError) as error:
             print(f"Speech: {error}"); return 2
         defaults = NaturalSettings()
@@ -762,7 +843,7 @@ def main(argv: Optional[List[str]] = None, audio_player_factory=None) -> int:
         plan = ExplorePlan.make(settings)
     elif speech is not None:
         track = speech_face.SpeechTrack.make(speech, speech_at, seed=a.seed)
-        plan = SpeechPlan.make_speech(settings, track, lips=a.lips)
+        plan = SpeechPlan.make_speech(settings, track, lips=a.lips, articulation=a.articulation)
     else:
         plan = NaturalPlan.make(settings)
     say = lambda text: print(text, flush=True)  # noqa: E731
@@ -813,9 +894,11 @@ def main(argv: Optional[List[str]] = None, audio_player_factory=None) -> int:
         wav = speech.write_wav(setup.run / SPEECH_FILE)
         audio_at = max(0.0, speech_at - a.audio_advance_ms / 1000.0)
         session.log["natural"]["speech"] = {
-            **speech_face.summary(speech), "voice": a.voice, "wpm": a.wpm, "pitch": a.pitch,
+            **speech_face.summary(speech), "voice": a.voice, "speed": a.speed,
+            "wpm": a.wpm, "pitch": a.pitch,
             "wav": str(wav), "start_s": speech_at, "audio_at_s": audio_at,
             "audio_advance_ms": a.audio_advance_ms, "lips": a.lips, "played": not a.no_audio,
+            "articulation": a.articulation,
             "phrases": plan.track.phrases,
             "phones": [(round(p.start_s, 3), round(p.end_s, 3), p.ipa) for p in speech.phones],
             "visemes": {"anticipate_s": speech_face.ANTICIPATE_S, "blend_s": speech_face.BLEND_S,
